@@ -20,11 +20,12 @@ onside_movement:
         - type: s3
           key_id: test
           secret: test
-          region: ap-southeast-2
+          region: "{{ env_var('DBT_S3_REGION', 'ap-southeast-2') }}"
           endpoint: "{{ env_var('LOCALSTACK_S3_HOST', 'localhost:4566') }}"
           url_style: path
           use_ssl: false
-    # Real AWS: the default credential chain (Plan 3 deploys it).
+    # Real AWS: the default credential chain. The region is the deployed stack's (the Makefile
+    # reads it from state/<env>/outputs.json), ap-southeast-2 by default.
     aws:
       type: duckdb
       path: "{{ env_var('REPO_ROOT', '.') }}/warehouse/aws.duckdb"
@@ -35,4 +36,4 @@ onside_movement:
       secrets:
         - type: s3
           provider: credential_chain
-          region: ap-southeast-2
+          region: "{{ env_var('DBT_S3_REGION', 'ap-southeast-2') }}"

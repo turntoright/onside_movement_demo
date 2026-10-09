@@ -1,5 +1,7 @@
 """Shared builders for tests."""
 
+import os
+import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -93,3 +95,12 @@ def build_trace_warehouse(path: Path) -> Path:
     )
     con.close()
     return path
+
+
+def make(*args: str, root: Path | None = None) -> subprocess.CompletedProcess:
+    """Run make on this repo; with `root`, state/ and warehouse/ live there instead."""
+    env = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MFLAGS", "MAKELEVEL")}
+    cmd = ["make", "--no-print-directory", "-C", str(ROOT), *args]
+    if root is not None:
+        cmd += [f"REPO_ROOT={root}", f"VENV={ROOT / '.venv'}"]
+    return subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=60)

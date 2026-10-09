@@ -71,15 +71,20 @@ ifeq ($(ENV),sim)
 DATA_GLOB = $(REPO_ROOT)/data/sim/compacted/*/*.ndjson
 REF_ROOT = $(REPO_ROOT)/data/sim/ref/
 else
-BUCKET = $(shell $(PY) -c 'import json, sys; print(json.load(open(sys.argv[1]))["bucket"]["value"])' \
-	$(REPO_ROOT)/state/$(ENV)/outputs.json 2>/dev/null)
+# One Terraform output of the deployed stack, e.g. $(call OUTPUT,bucket); empty before deploy.
+OUTPUT = $(shell $(PY) -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]]["value"])' \
+	$(REPO_ROOT)/state/$(ENV)/outputs.json $(1) 2>/dev/null)
+BUCKET = $(call OUTPUT,bucket)
+S3_REGION = $(call OUTPUT,region)
 DATA_GLOB = s3://$(BUCKET)/compacted/$(ENV)/*/*.ndjson
 REF_ROOT = s3://$(BUCKET)/ref/
 endif
 
-# LOCALSTACK_S3_HOST (host:port, no scheme) feeds the dbt `local` profile's S3 secret.
+# LOCALSTACK_S3_HOST (host:port, no scheme) feeds the dbt `local` profile's S3 secret;
+# DBT_S3_REGION is the stack's region (outputs.json) for the local and aws S3 secrets.
 DBT_ENV = DBT_PROFILES_DIR=$(REPO_ROOT)/dbt \
 	LOCALSTACK_S3_HOST='$(patsubst http://%,%,$(LOCALSTACK_ENDPOINT))' \
+	DBT_S3_REGION='$(or $(S3_REGION),ap-southeast-2)' \
 	DBT_COMPACTED_GLOB='$(DATA_GLOB)' \
 	DBT_REF_ROOT='$(REF_ROOT)'
 
@@ -104,8 +109,40 @@ sim-e2e: sim-data
 
 HOPS ?= 3
 
+# ENV=sim runs the trace module on warehouse/sim.duckdb. ENV=local|aws submits the Dagster
+# trace job to the running `make dagster ENV=...` (its run queue and duckdb pool), waits,
+# and prints state/<env>/trace/<run_id>.json (spec §6.4).
 trace:
+ifeq ($(ENV),sim)
 	$(PY) -m tracing --db $(REPO_ROOT)/warehouse/$(ENV).duckdb --property $(PROPERTY) --start $(START) --max-hops $(HOPS)
+else
+	$(ORCH_ENV) $(PY) -m orchestration.trace_job --env $(ENV) --property $(PROPERTY) \
+		--start $(START) --max-hops $(HOPS) --host $(DAGSTER_HOST) --port $(DAGSTER_PORT)
+endif
+
+# ---- Dagster (ENV=local|aws, spec §6.4) ----
+
+DAGSTER_HOST := 127.0.0.1
+DAGSTER_PORT := 3000
+DAGSTER_HOME_DIR = $(REPO_ROOT)/state/$(ENV)/dagster
+# The code location's environment: everything dbt-build sets (bucket globs, region, S3 host),
+# plus the env, the Dagster instance and lambdas/ (generator.stream imports standdown_checker).
+ORCH_ENV = $(DBT_ENV) ONSIDE_ENV=$(ENV) DAGSTER_HOME=$(DAGSTER_HOME_DIR) \
+	PYTHONPATH=$(REPO_ROOT)/lambdas LOCALSTACK_ENDPOINT=$(LOCALSTACK_ENDPOINT)
+
+.PHONY: dagster
+
+# The webserver and the daemon (sensor, schedule, run queue) on 127.0.0.1:3000 only. The
+# dbt manifest for this env's target is parsed first, offline, into state/<env>/dagster/dbt/.
+# DBT_TARGET_PATH moves the per-invocation artifacts dagster-dbt writes (one directory per run)
+# under state/<env>/, so they go away with it; the parse above passes an explicit --target-path.
+dagster: infra-env
+	@if [ -z "$(BUCKET)" ]; then \
+		echo "error: no bucket in state/$(ENV)/outputs.json; run make deploy ENV=$(ENV)" >&2; exit 2; fi
+	mkdir -p $(DAGSTER_HOME_DIR) $(REPO_ROOT)/warehouse
+	cp $(REPO_ROOT)/orchestration/dagster.yaml $(DAGSTER_HOME_DIR)/dagster.yaml
+	cd dbt && $(DBT_ENV) $(DBT) parse --quiet --target $(ENV) --target-path $(DAGSTER_HOME_DIR)/dbt
+	$(ORCH_ENV) DBT_TARGET_PATH=$(DAGSTER_HOME_DIR)/dbt/runs $(VENV)/bin/dagster dev -h $(DAGSTER_HOST) -p $(DAGSTER_PORT) -m orchestration.definitions
 
 # ---- LocalStack (ENV=local) ----
 

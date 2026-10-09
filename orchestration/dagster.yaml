@@ -1,0 +1,13 @@
+# The Dagster instance for `make dagster ENV=local|aws`, copied to state/<env>/dagster/.
+# Every run goes through the queue. One concurrency pool, `duckdb`, admits one op at a time
+# (spec §6.4): the dbt build, the checks that read the warehouse and the trace op, so no two
+# processes ever hold warehouse/<env>.duckdb.
+run_coordinator:
+  module: dagster.core.run_coordinator
+  class: QueuedRunCoordinator
+concurrency:
+  pools:
+    default_limit: 1 # the only pool is `duckdb`
+    granularity: op
+telemetry:
+  enabled: false # the demo runs offline
