@@ -289,3 +289,42 @@ def test_alerts_counts_json_alert_lines_across_pages(monkeypatch, capsys):
 
 def test_alerts_refuses_sim(capsys):
     assert main(["alerts", "--env", "sim"]) == 2
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        EndpointConnectionError(endpoint_url="http://localhost:4566"),
+        ClientError(
+            {"Error": {"Code": "ResourceNotFoundException", "Message": "no log group"}},
+            "FilterLogEvents",
+        ),
+    ],
+)
+def test_unhandled_aws_errors_print_the_reset_hint_without_a_traceback(
+    repo, monkeypatch, capsys, error
+):
+    class Logs:
+        def filter_log_events(self, **kwargs):
+            raise error
+
+    monkeypatch.setattr(A, "client", lambda env, service: Logs())
+    assert main(["alerts", "--env", "local"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: ")
+    assert str(error) in err
+    assert "make up" in err
+    assert "Traceback" not in err
+
+
+def test_aws_errors_while_settling_point_to_make_settle(aws, repo, capsys):
+    run_id = "6f1c2a3e-0000-4000-8000-000000000001"
+    started = "2026-10-10T01:00:00+00:00"
+    cli.S.write_manifest("local", run_id, "live", 42, {"CheckIn": 1}, started_at=started)
+    aws.sqs.delete_queue(QueueUrl=aws.queue_urls["archive_dlq"])  # e.g. LocalStack restarted
+    assert main(["settle", "--env", "local", "--run", run_id, "--timeout", "0"]) == 2
+    err = capsys.readouterr().err
+    assert "NonExistentQueue" in err or "QueueDoesNotExist" in err
+    assert "the spool is kept" in err
+    assert f"`make settle ENV=local RUN={run_id}`" in err
+    assert "Traceback" not in err

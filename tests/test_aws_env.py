@@ -28,6 +28,17 @@ def test_aws_clients_use_the_default_credential_chain():
     assert A.client_kwargs("aws") == {"region_name": "ap-southeast-2"}
 
 
+def test_local_clients_fail_fast_and_aws_clients_keep_retrying():
+    local = A.client_config("local")
+    assert local.retries == {"max_attempts": 3, "mode": "standard"}
+    assert local.connect_timeout == 2
+    assert local.s3 == {"addressing_style": "path"}
+    remote = A.client_config("aws")
+    assert remote.retries == {"max_attempts": 10, "mode": "standard"}
+    assert remote.connect_timeout == 60  # the botocore default
+    assert remote.s3 is None
+
+
 def test_sim_makes_no_aws_calls():
     with pytest.raises(S.GeneratorError, match="no AWS calls"):
         A.client_kwargs("sim")

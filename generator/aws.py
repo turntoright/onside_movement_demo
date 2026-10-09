@@ -31,12 +31,18 @@ def client_kwargs(env: str) -> dict:
     raise GeneratorError(f"ENV={env} makes no AWS calls; use ENV=local or ENV=aws")
 
 
+def client_config(env: str) -> Config:
+    if env == "local":  # LocalStack down should fail in seconds, not after a minute of retries
+        return Config(
+            retries={"max_attempts": 3, "mode": "standard"},
+            connect_timeout=2,
+            s3={"addressing_style": "path"},
+        )
+    return Config(retries={"max_attempts": 10, "mode": "standard"})
+
+
 def client(env: str, service: str):
-    config = Config(
-        retries={"max_attempts": 10, "mode": "standard"},
-        s3={"addressing_style": "path"} if env == "local" else None,
-    )
-    return boto3.client(service, config=config, **client_kwargs(env))
+    return boto3.client(service, config=client_config(env), **client_kwargs(env))
 
 
 @dataclass(frozen=True)

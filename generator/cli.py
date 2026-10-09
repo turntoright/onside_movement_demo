@@ -192,7 +192,13 @@ def _emit(env: str, emissions: list[Emission], conn: A.Connection) -> int:
 
 def settle_run(conn: A.Connection, manifest: dict, timeout: float) -> dict:
     started = datetime.now(UTC)
-    settled = Settler(manifest, conn, timeout_seconds=timeout).run()
+    try:
+        settled = Settler(manifest, conn, timeout_seconds=timeout).run()
+    except (BotoCoreError, ClientError) as exc:  # the spool survives; a rerun resumes from it
+        raise S.GeneratorError(
+            f"{exc}; settling stopped and the spool is kept: once the stack is reachable, resume "
+            f"with `make settle ENV={conn.env} RUN={manifest['run_id']}`"
+        ) from None
     seconds = (datetime.now(UTC) - started).total_seconds()
     print(
         f"settled run {manifest['run_id']} in {seconds:.0f}s: {settled['envelopes']} envelopes, "
@@ -323,4 +329,7 @@ def main(argv: list[str] | None = None) -> int:
         return COMMANDS[args.command](args)
     except S.GeneratorError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except (BotoCoreError, ClientError) as exc:  # an AWS call outside the handled paths
+        print(f"error: {exc}; {S.reset_hint(args.env)}", file=sys.stderr)
         return 2
