@@ -12,7 +12,7 @@ N ?= 50
 # standdown_checker lives under lambdas/; the editable install does not map it.
 GEN_PY := PYTHONPATH=$(REPO_ROOT)/lambdas $(PY)
 
-.PHONY: venv fmt lint unit test setup generate reset dbt-build sim-data trace
+.PHONY: venv fmt lint unit test setup generate reset dbt-build sim-data sim-e2e trace
 
 venv:
 	python3 -m venv $(VENV)
@@ -54,6 +54,9 @@ sim-data:
 	$(MAKE) setup ENV=sim SCALE=ci
 	$(MAKE) generate ENV=sim MODE=backfill
 	$(MAKE) generate ENV=sim MODE=live N=30
+
+sim-e2e: sim-data
+	$(MAKE) dbt-build ENV=sim
 
 HOPS ?= 3
 
