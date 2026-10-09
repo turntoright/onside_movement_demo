@@ -243,3 +243,15 @@ def test_missing_poison_dir_with_dlq_depth_warns(conn):
     with pytest.raises(SettleTimeout, match="but only 0 poison"):
         settler(conn, FakeTime(), timeout_seconds=10, log=lines.append).run()
     assert any("only 0 poison messages" in line for line in lines)
+
+
+def test_a_run_whose_window_has_no_raw_objects_settles_empty(conn):
+    """A zero-event live run long after any activity: no raw object, so no spool file."""
+    empty = {**MANIFEST, "counts": {"CheckIn": 0, "CheckOut": 0, "PlantMovement": 0}, "total": 0}
+    fake = FakeTime()
+    settled = Settler(
+        empty, conn, log=lambda line: None, sleep=fake.sleep, clock=fake.clock, now=lambda: NOW
+    ).run()
+    assert (settled["envelopes"], settled["breaches"], settled["parts"]) == (0, 0, [])
+    key = f"control/settled/{RUN}.json"
+    assert conn.s3.get_object(Bucket=conn.outputs.bucket, Key=key)["ContentLength"] > 0

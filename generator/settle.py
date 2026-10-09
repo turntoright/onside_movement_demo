@@ -283,6 +283,6 @@ class Settler:
         }
         self.conn.put_json(f"control/settled/{self.run_id}.json", settled)
         write_json(state_dir(self.env) / "settled" / f"{self.run_id}.json", settled)
-        self.spool.unlink()
+        self.spool.unlink(missing_ok=True)  # no raw object in the window: never created
         self.key_cache.unlink(missing_ok=True)
         return settled
