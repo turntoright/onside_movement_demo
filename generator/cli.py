@@ -215,15 +215,27 @@ def cmd_settle(args: argparse.Namespace) -> int:
     return 0
 
 
+LAST_ALERTS = 5
+
+
+def _detected(record: dict) -> datetime | None:
+    """The alert's detected time, if it is a valid ISO 8601 time with an offset."""
+    try:
+        detected = datetime.fromisoformat(record["detected_time"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return detected if detected.tzinfo is not None else None  # naive cannot sort with aware
+
+
 def cmd_alerts(args: argparse.Namespace) -> int:
-    """Count the stand-down alerts in the checker Lambda's logs (spec §9 step 2)."""
+    """Count the stand-down alerts in the checker Lambda's logs; show the latest (spec §9)."""
     if args.env == "sim":
         raise S.GeneratorError("alerts needs ENV=local or ENV=aws (it reads Lambda logs)")
     outputs = A.load_outputs(args.env)
     logs = A.client(args.env, "logs", outputs.region)
     log_group = f"/aws/lambda/{outputs.standdown_function}"  # Terraform creates it beforehand
     lines = 0
-    distinct: set[str] = set()
+    distinct: dict[str, dict] = {}
     token = None
     while True:
         kwargs = {"logGroupName": log_group, "filterPattern": '{ $.level = "alert" }'}
@@ -237,14 +249,26 @@ def cmd_alerts(args: argparse.Namespace) -> int:
                 continue
             if isinstance(record, dict) and record.get("level") == "alert":
                 lines += 1
-                distinct.add(str(record.get("checkin_event_id")))
+                distinct.setdefault(str(record.get("checkin_event_id")), record)
         token = page.get("nextToken")
         if not token:
             break
     print(
         f"{lines} alert log lines, {len(distinct)} distinct alerts "
-        "(by checkin_event_id; redeliveries log twice)"
+        "(by checkin_event_id; repeats are redeliveries or duplicate events)"
     )
+    timed = [(t, r) for r in distinct.values() if (t := _detected(r)) is not None]
+    latest = sorted(timed, key=lambda tr: (tr[0], str(tr[1].get("checkin_event_id"))))
+    if latest:
+        print(
+            f"last {min(LAST_ALERTS, len(latest))} alerts (detected time, person, origin -> "
+            "destination property, rule):"
+        )
+    for _, r in latest[-LAST_ALERTS:]:
+        print(
+            f"  {r['detected_time']}  {r.get('person_id')}  "
+            f"{r.get('origin_property_id')} -> {r.get('dest_property_id')}  {r.get('rule_id')}"
+        )
     return 0
 
 

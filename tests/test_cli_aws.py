@@ -251,22 +251,38 @@ def test_failed_poison_emit_points_to_the_recovery(aws, repo, monkeypatch, capsy
 
 
 def test_alerts_counts_json_alert_lines_across_pages(repo, monkeypatch, capsys):
-    def alert(checkin_id):
-        return json.dumps({"level": "alert", "checkin_event_id": checkin_id})
+    def alert(n: int, detected: str) -> str:
+        return json.dumps(
+            {
+                "level": "alert",
+                "checkin_event_id": f"c{n}",
+                "person_id": f"U{n:05d}",
+                "origin_property_id": f"P{n:04d}",
+                "dest_property_id": f"P{n + 100:04d}",
+                "rule_id": "R02",
+                "detected_time": detected,
+            }
+        )
 
     pages = [
         {
             "events": [
                 {"message": "START RequestId: x Version: $LATEST\n"},
-                {"message": alert("c1")},
+                {"message": alert(1, "2026-10-10T09:00:00+13:00")},
+                {"message": alert(2, "2026-10-10T08:00:00+13:00")},
+                {"message": alert(3, "2026-10-09T21:30:00+00:00")},  # 10:30 in Auckland
                 {"message": json.dumps({"level": "error", "msg": "poison"})},
             ],
             "nextToken": "t1",
         },
         {
             "events": [
-                {"message": alert("c2")},
-                {"message": alert("c1")},  # redelivery logs the same alert twice
+                {"message": alert(4, "2026-10-10T10:00:00+13:00")},
+                {"message": alert(1, "2026-10-10T09:00:00+13:00")},  # a repeat logs again
+                {"message": alert(5, "2026-10-10T11:00:00+13:00")},
+                {"message": alert(6, "2026-10-10T07:00:00+13:00")},
+                {"message": alert(7, "2026-10-10T12:00:00+13:00")},
+                {"message": alert(8, "2026-10-10T23:00:00")},  # no offset: counted, not listed
                 {"message": "END RequestId: x\n"},
                 {"message": "REPORT RequestId: x Duration: 1 ms\n"},
             ]
@@ -284,7 +300,19 @@ def test_alerts_counts_json_alert_lines_across_pages(repo, monkeypatch, capsys):
     logs = Logs()
     monkeypatch.setattr(A, "client", lambda env, service, region: logs)
     assert main(["alerts", "--env", "local"]) == 0
-    assert "3 alert log lines, 2 distinct alerts" in capsys.readouterr().out
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == (
+        "9 alert log lines, 8 distinct alerts "
+        "(by checkin_event_id; repeats are redeliveries or duplicate events)"
+    )
+    assert out[1].startswith("last 5 alerts (detected time, person")
+    assert out[2:] == [  # the latest five by time, oldest first; c2 and c6 are older
+        "  2026-10-10T09:00:00+13:00  U00001  P0001 -> P0101  R02",
+        "  2026-10-10T10:00:00+13:00  U00004  P0004 -> P0104  R02",
+        "  2026-10-09T21:30:00+00:00  U00003  P0003 -> P0103  R02",
+        "  2026-10-10T11:00:00+13:00  U00005  P0005 -> P0105  R02",
+        "  2026-10-10T12:00:00+13:00  U00007  P0007 -> P0107  R02",
+    ]
     assert logs.calls[1]["nextToken"] == "t1"
     assert logs.calls[0]["logGroupName"] == "/aws/lambda/onside-standdown-checker"
 

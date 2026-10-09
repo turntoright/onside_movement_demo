@@ -36,7 +36,7 @@ The same chain that Terraform deploys to AWS, on LocalStack 4.14.0 (community, n
     make setup ENV=local                      # reference data -> S3 ref/ and DynamoDB properties
     make generate ENV=local MODE=backfill     # emit, then settle and compact (about 16 min)
     make dbt-build ENV=local                  # dbt reads s3://<bucket>/compacted/local/
-    make alerts ENV=local                     # alert log lines and distinct alerts
+    make alerts ENV=local                     # alert counts and the last 5 alerts
     make generate ENV=local MODE=live N=50    # the demo step; settles in under a minute
     make poison ENV=local K=2                 # malformed events reach the visit DLQ (~3 min)
     make settle ENV=local RUN=<run_id>        # resume a settle that timed out
