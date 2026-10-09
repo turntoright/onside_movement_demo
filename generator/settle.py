@@ -17,7 +17,7 @@ from pathlib import Path
 from . import queues as Q
 from .aws import Connection
 from .config import state_dir
-from .state import GeneratorError, write_json
+from .state import GeneratorError, poison_injected, write_json
 from .stream import event_id
 
 QUIET_SECONDS = 30
@@ -192,17 +192,10 @@ class Settler:
                 f"`make settle ENV={self.env} RUN={self.run_id}`"
             )
 
-    def _poison_injected(self) -> int:
-        """Poison messages this env has injected: the sum of `k` over state/<env>/poison/*.json."""
-        directory = state_dir(self.env) / "poison"
-        if not directory.is_dir():
-            return 0
-        return sum(int(json.loads(p.read_text()).get("k", 0)) for p in directory.glob("*.json"))
-
     def _visit_dlq_hint(self) -> tuple[int, str] | None:
         """A warning when the visit DLQ holds more than the injected poison messages."""
         held = Q.visible(self.conn.sqs, self.conn.outputs.visit_dlq_url)
-        injected = self._poison_injected()
+        injected = poison_injected(self.env)
         if held <= injected:
             return None
         return held, (
@@ -236,6 +229,20 @@ class Settler:
                 new += 1
         return new
 
+    def _delete_stale_parts(self, prefix: str, keep: set[str]) -> None:
+        """Remove parts left by an earlier, longer compaction (after the new parts are written)."""
+        stale = [key for key in self.conn.keys(prefix) if key not in keep]
+        errors = []
+        for i in range(0, len(stale), 1000):
+            objects = [{"Key": k} for k in stale[i : i + 1000]]
+            response = self.conn.s3.delete_objects(
+                Bucket=self.conn.outputs.bucket, Delete={"Objects": objects, "Quiet": True}
+            )
+            errors += response.get("Errors", [])
+        if errors:
+            failed = ", ".join(f"{e.get('Key')} ({e.get('Code')})" for e in errors)
+            raise GeneratorError(f"could not delete stale compacted parts: {failed}")
+
     def _compact(self, tally: Tally) -> dict:
         prefix = f"compacted/{self.env}/{self.run_id}/"
         parts: list[str] = []
@@ -249,14 +256,6 @@ class Settler:
             parts.append(key)
             buffer.clear()
 
-        stale = list(
-            self.conn.keys(prefix)
-        )  # a re-compaction may have fewer parts than a crashed one
-        for i in range(0, len(stale), 1000):
-            objects = [{"Key": k} for k in stale[i : i + 1000]]
-            self.conn.s3.delete_objects(
-                Bucket=self.conn.outputs.bucket, Delete={"Objects": objects, "Quiet": True}
-            )
         written = 0
         for line in self._spool_lines():
             envelope_id = json.loads(line).get("id")
@@ -270,6 +269,7 @@ class Settler:
                 flush()
         if buffer:
             flush()
+        self._delete_stale_parts(prefix, set(parts))
         settled = {
             "run_id": self.run_id,
             "env": self.env,

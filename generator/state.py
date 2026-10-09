@@ -99,3 +99,11 @@ def check_remote_consistency(env: str, state: dict | None, remote_ids: set[str])
             f"ENV={env}: S3 control/manifests {sorted(remote_ids)} do not match "
             f"state/{env} runs {sorted(runs)}; {reset_hint(env)}"
         )
+
+
+def poison_injected(env: str) -> int:
+    """Poison messages this env has injected: the sum of `k` over state/<env>/poison/*.json."""
+    directory = state_dir(env) / "poison"
+    if not directory.is_dir():
+        return 0
+    return sum(int(json.loads(p.read_text()).get("k", 0)) for p in directory.glob("*.json"))

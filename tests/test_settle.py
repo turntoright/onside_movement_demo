@@ -222,3 +222,24 @@ def test_visit_dlq_matching_poison_is_silent(conn, tmp_path):
         settler(conn, FakeTime(), timeout_seconds=10, log=lines.append).run()
     assert "dead-lettered" not in str(caught.value)
     assert not any("dead-lettered" in line for line in lines)
+
+
+def test_stale_part_delete_errors_raise(conn):
+    put_raw(conn, "raw/2026/10/10/01/a.ndjson", APP + DERIVED)
+    conn.s3.put_object(
+        Bucket=conn.outputs.bucket, Key=f"compacted/local/{RUN}/part-0005.ndjson", Body=b""
+    )
+    conn.s3.delete_objects = lambda **kwargs: {
+        "Errors": [{"Key": "compacted/x/part-0005.ndjson", "Code": "AccessDenied"}]
+    }
+    with pytest.raises(GeneratorError, match="part-0005.ndjson \\(AccessDenied\\)"):
+        settler(conn, FakeTime()).run()
+
+
+def test_missing_poison_dir_with_dlq_depth_warns(conn):
+    put_raw(conn, "raw/2026/10/10/01/a.ndjson", APP)
+    conn.sqs.depth[conn.outputs.visit_dlq_url] = 1
+    lines = []
+    with pytest.raises(SettleTimeout, match="but only 0 poison"):
+        settler(conn, FakeTime(), timeout_seconds=10, log=lines.append).run()
+    assert any("only 0 poison messages" in line for line in lines)
