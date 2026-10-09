@@ -3,6 +3,7 @@ name: ci
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -30,3 +31,29 @@ jobs:
         with:
           terraform_version: "1.15.8"
       - run: make tf-check
+
+  # The full chain on a fresh LocalStack (spec §7.3, §8): pushes to main and manual runs only
+  # (about 6 minutes plus image pulls). Community 4.14.0 needs no token or repository secret.
+  localstack:
+    needs: offline # a lint/unit failure should not spend ~10 runner minutes on LocalStack
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    concurrency:
+      group: localstack-${{ github.ref }}
+      cancel-in-progress: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.8"
+          terraform_wrapper: false # `make deploy` pipes `terraform output -json` to a file
+      - run: make venv
+      - run: make integration
+      - if: failure()
+        run: docker compose logs --tail 300 localstack
