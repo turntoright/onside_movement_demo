@@ -66,6 +66,18 @@ def test_manifest_records_its_start_and_can_be_read_back(tmp_path, monkeypatch):
         S.read_manifest("local", "run-2")
 
 
+def test_the_aws_hint_checks_the_setup_before_any_destroy():
+    # An expired session or a stray endpoint variable looks like a lost stack (spec §3.2).
+    hint = S.reset_hint("aws")
+    assert hint.startswith(
+        "check credentials, region and endpoint variables (docs/aws-deploy.md steps 1-2); "
+    )
+    assert hint.endswith(
+        "only if the stack is really gone: run `make destroy ENV=aws`, then deploy and setup again"
+    )
+    assert S.reset_hint("local").startswith("run `make up`")
+
+
 def test_local_inconsistency_says_make_up(tmp_path, monkeypatch):
     monkeypatch.setenv("REPO_ROOT", str(tmp_path))
     S.write_manifest("local", "run-1", "backfill", 42, {"CheckIn": 1})

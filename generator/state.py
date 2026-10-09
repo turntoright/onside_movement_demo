@@ -44,7 +44,12 @@ def reset_hint(env: str) -> str:
     if env == "local":
         return "run `make up` (LocalStack restarts empty), then deploy and setup again"
     if env == "aws":
-        return "run `make destroy ENV=aws`, then deploy and setup again"
+        # An expired session or a stray endpoint variable looks like a lost stack.
+        return (
+            "check credentials, region and endpoint variables (docs/aws-deploy.md steps 1-2); "
+            "only if the stack is really gone: run `make destroy ENV=aws`, "
+            "then deploy and setup again"
+        )
     return f"run `make reset ENV={env}` and start again"
 
 

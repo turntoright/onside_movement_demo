@@ -216,3 +216,7 @@ def test_an_unexpected_error_is_recorded_in_the_result_file(repo):
     result = execute()
     assert not result.success
     assert "fct_movements" in result_file(repo, result.run_id)["error"]
+
+
+def test_short_reason_of_an_empty_message_is_the_exception_type():
+    assert T.short_reason(ConnectionError()) == "ConnectionError"

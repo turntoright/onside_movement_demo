@@ -148,8 +148,8 @@ aws sts get-caller-identity --query Account --output text
 ```
 
 prints the same value as `$AWS_ACCOUNT_ID`. If the Dagster UI shows the `settled_runs` sensor
-skipping with a hint to run `make destroy ENV=aws`, do NOT run it: that hint means this
-terminal cannot see the stack, so check steps 1–2 first. Stop any `make dagster ENV=local`
+skipping with "the stack is gone or unreachable", do NOT run `make destroy ENV=aws`: it usually
+means this terminal cannot see the stack, so check steps 1–2 first, as the hint says. Stop any `make dagster ENV=local`
 first (one Dagster at a time, on port 3000). Then:
 
 ```bash

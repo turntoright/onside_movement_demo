@@ -1,5 +1,8 @@
 import json
+import os
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import boto3
@@ -385,3 +388,21 @@ def test_aws_errors_while_settling_point_to_make_settle(aws, repo, capsys):
     assert "the spool is kept" in err
     assert f"`make settle ENV=local RUN={run_id}`" in err
     assert "Traceback" not in err
+
+
+def test_a_closed_stdout_ends_the_cli_without_a_broken_pipe_traceback(tmp_path):
+    # e.g. `make alerts ENV=local | head -1`: the reader is gone before the CLI prints.
+    read_end, write_end = os.pipe()
+    os.close(read_end)
+    with os.fdopen(write_end, "wb") as stdout:
+        proc = subprocess.run(
+            [sys.executable, "-m", "generator", "reset", "--env", "sim"],
+            cwd=ROOT,
+            env={**os.environ, "REPO_ROOT": str(tmp_path)},
+            stdout=stdout,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60,
+        )
+    assert "BrokenPipeError" not in proc.stderr
+    assert "Traceback" not in proc.stderr

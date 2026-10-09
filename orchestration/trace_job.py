@@ -71,7 +71,7 @@ def trace_job():
 
 def short_reason(exc: BaseException) -> str:
     """DagsterGraphQLClientError's text carries the whole query; prefer the underlying cause."""
-    return str(exc.__cause__ or exc).splitlines()[0]
+    return (str(exc.__cause__ or exc).splitlines() or [type(exc).__name__])[0]
 
 
 def dagster_running(host: str, port: int) -> bool:
