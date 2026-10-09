@@ -1,31 +1,12 @@
-import duckdb
 import pytest
 
+from tests.helpers import build_trace_warehouse
 from tracing.cli import TraceError, format_table, main, trace_warehouse
 
 
 @pytest.fixture()
 def db(tmp_path):
-    path = tmp_path / "w.duckdb"
-    con = duckdb.connect(str(path))
-    con.execute("create table stg_properties (property_id varchar, property_type varchar)")
-    con.execute(
-        "insert into stg_properties values ('P1','poultry'), ('P2','poultry'), ('P3','office')"
-    )
-    con.execute(
-        "create table fct_movements (origin_property_id varchar, dest_property_id varchar, "
-        "departure_time timestamptz, arrival_time timestamptz, connected boolean)"
-    )
-    con.execute(
-        "insert into fct_movements values "
-        "('P1','P2','2026-03-03 10:00:00+13','2026-03-03 12:00:00+13', true)"
-    )
-    con.execute(
-        "create table stg_plant_movements (source_property_id varchar, dest_property_id varchar, "
-        "movement_date date)"
-    )
-    con.close()
-    return path
+    return build_trace_warehouse(tmp_path / "w.duckdb")
 
 
 def test_traces_downstream_properties(db, capsys):

@@ -1,8 +1,9 @@
-"""Shared builders for processor tests."""
+"""Shared builders for tests."""
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import duckdb
 from standdown_checker.processor import process_event
 from standdown_checker.rules import load_rules
 
@@ -68,3 +69,27 @@ def run(store, detail_type, detail, *, clock=None, sleep=None):
 
 def types(outbound) -> list[str]:
     return [o.detail_type for o in outbound]
+
+
+def build_trace_warehouse(path: Path) -> Path:
+    """A tiny warehouse for tracing: P1 -> P2 (connected), P3 isolated."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect(str(path))
+    con.execute("create table stg_properties (property_id varchar, property_type varchar)")
+    con.execute(
+        "insert into stg_properties values ('P1','poultry'), ('P2','poultry'), ('P3','office')"
+    )
+    con.execute(
+        "create table fct_movements (origin_property_id varchar, dest_property_id varchar, "
+        "departure_time timestamptz, arrival_time timestamptz, connected boolean)"
+    )
+    con.execute(
+        "insert into fct_movements values "
+        "('P1','P2','2026-03-03 10:00:00+13','2026-03-03 12:00:00+13', true)"
+    )
+    con.execute(
+        "create table stg_plant_movements (source_property_id varchar, dest_property_id varchar, "
+        "movement_date date)"
+    )
+    con.close()
+    return path
