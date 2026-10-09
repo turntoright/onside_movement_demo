@@ -1,7 +1,6 @@
 # Onside movement demo — design
 
-Date: 2026-10-09. Revision 2: blocking issues from the first independent review fixed
-(see §12).
+Date: 2026-10-09. Revision 3: blocking issues from reviews 1 and 2 fixed (see §12).
 
 ## 1. Purpose
 
@@ -31,6 +30,7 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
 - API Gateway / webhook ingestion (the generator plays the app backend).
 - ClickHouse, Iceberg, Athena, BI dashboards.
 - Incremental dbt models (full rebuild at demo scale).
+- Trimming per-person state (§6.1 explains why the demo doesn't need it).
 - The real product's rules between individual properties and groups, and temporary
   outbreak overrides. The demo models rules between **property types** only.
 
@@ -39,45 +39,52 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
 ```
  Generator (Python)
    ├─ setup: reference data → DynamoDB `properties` + S3 ref/ (same snapshot)
-   └─ PutEvents in received_time order: CheckIn / CheckOut / PlantMovement
+   ├─ PutEvents in received_time order: CheckIn / CheckOut / PlantMovement
+   └─ after settling: S3 control/settled/<run_id>.json
         ▼
  EventBridge bus: onside-events
-   ├─ rule (source=onside.app, CheckIn|CheckOut)
-   │     ──► SQS visit-queue (standard, DLQ after 3 receives)
+   ├─ rule A (source=onside.app, CheckIn|CheckOut)
+   │     ──► SQS visit-queue (standard, DLQ after 5 receives)
    │           ──► Lambda standdown_checker
-   │                 ├─ DynamoDB properties            (read, cached per container)
-   │                 ├─ DynamoDB person_state          (one item per person, versioned)
+   │                 ├─ DynamoDB properties     (read, cached per container)
+   │                 ├─ DynamoDB person_state   (one item per person, versioned)
+   │                 ├─ DynamoDB evaluations    (one item per check-in)
    │                 └─ after commit: PutEvents (source=onside.standdown)
-   │                       CheckInEvaluated (every check-in)
-   │                       HighRiskVisitDetected (breaches only)
-   └─ rule (all sources) ──► Firehose (input transformer: one event per line)
+   │                       CheckInEvaluated, CheckOutApplied, HighRiskVisitDetected
+   └─ rule B (all sources, excluding detail.poison) ──► Firehose (no transform)
                               ──► S3 raw/ (arrival-hour prefixes)
                                     │
- Dagster (schedule + S3 sensor)
+ Dagster (S3 sensor on control/settled/ + schedule)
    └─ dbt-duckdb reads S3 → models → tests → DuckDB file
         └─ outputs: movements, network, high-risk visits, reconciliation,
-                    key properties; trace job
+                    key properties; trace job (read-only)
 ```
 
-The SQS rule filters on `source = onside.app`, so the Lambda's own events never loop
-back into the queue.
+- Rule A filters on `source = onside.app`, so the Lambda's own events never loop back
+  into the queue.
+- Rules A and B both use the pattern `"detail": {"poison": [{"exists": false}]}`
+  where needed. Poison events only reach the queue (to demo the DLQ). Rule B leaves
+  them out of S3.
 
 ### Components
 
 | Unit | Responsibility | Depends on |
 |---|---|---|
-| `generator/` | Builds reference data and an event stream; loads reference data; emits events; writes a manifest; can also write the same JSON to local files | boto3 |
-| `lambdas/standdown_checker/rules.py` | Pure stand-down logic (§4): given a check-in, the person's visits and the rule matrix, return the evaluation | stdlib only |
-| `lambdas/standdown_checker/state.py` | Read and conditionally write `person_state`; trim the window | boto3 |
-| `lambdas/standdown_checker/handler.py` | SQS batch handler (§6.1) | rules, state |
+| `generator/` | Builds reference data and the event stream; loads reference data; emits events; waits for settling; writes manifests | boto3 |
+| `lambdas/standdown_checker/rules.py` | Pure stand-down logic (§4) | stdlib, tzdata |
+| `lambdas/standdown_checker/processor.py` | Event processing over a `StateStore` interface (§6.1). Shared by the Lambda and the local simulator | rules |
+| `lambdas/standdown_checker/dynamo_store.py` | `StateStore` on DynamoDB: reads, plus TransactWriteItems commits | boto3 |
+| `lambdas/standdown_checker/handler.py` | SQS batch wrapper: partial batch failures, PutEvents with `FailedEntryCount` checked | processor |
+| `generator/local_sim.py` | `StateStore` in memory. Runs `processor` in received_time order for `--local-out` | processor |
 | `shared/standdown_rules.csv` | The single source of rules: bundled into the Lambda zip and used as a dbt seed | — |
-| `shared/golden_cases.csv` | Shared edge cases, run by both pytest and dbt (§7) | — |
+| `shared/golden_cases.csv` | Pure-rule edge cases, run by both pytest and dbt (§6.3) | — |
 | `infra/terraform/` | All AWS resources; a variable switches between LocalStack endpoints and real AWS | — |
 | `dbt/` | Staging → intermediate → marts, tests, a Python model for network metrics | DuckDB, S3 |
-| `orchestration/` | Dagster definitions: dbt assets, S3 sensor, asset checks, trace job | dbt, boto3 |
+| `orchestration/` | Dagster definitions: dbt assets, sensor, asset checks, trace job | dbt, boto3 |
 
-Validation uses stdlib dataclasses, not pydantic, so the Lambda zip has no compiled
-dependencies.
+- Validation uses stdlib dataclasses, so the Lambda zip has no compiled dependencies.
+- The zip bundles the pure-Python `tzdata` package, so `zoneinfo` never depends on
+  the runtime's time-zone files.
 
 ## 3. Data and time
 
@@ -86,58 +93,82 @@ dependencies.
   `Pacific/Auckland`.
 - `event_time` is when it happened on the device. `received_time` is when the backend
   received it. The generator fixes both.
-- The generator emits events **in `received_time` order**. Two modes:
-  - `generate --backfill`: replays 12 months as fast as LocalStack accepts them, in
-    PutEvents batches of 10. It runs once before the demo and takes tens of minutes.
-  - `generate --live N`: emits N events with times shifted so that the last
-    `received_time` is about now. This is the live part of the demo.
+- The generator emits events in `received_time` order, in PutEvents batches of 10.
 - The Lambda never uses its own clock for business logic:
-  - `detected_time` (on its events) = the `received_time` of the check-in being
-    evaluated.
-  - Wall-clock time is kept separately as `processed_at`, for operations only.
-- **Window watermark:** `person_state.watermark` is the largest `event_time` seen for
-  that person. Trimming uses it (§6.1), never `now()`.
+  - `detected_time` = the `received_time` of the check-in being evaluated.
+  - Wall-clock `processed_at` is kept for operations only.
+  - Ordering proofs use DynamoDB item **versions**, not clocks (§6.2).
 
-### 3.2 Generator behaviour
-- Fixed random seed, so output is reproducible. Default scale: about 500 properties,
-  2,000 people, 100,000 check-ins over 12 months.
-- Properties have a type (e.g. poultry, pork, beef, dairy, kiwifruit, vineyard, office,
-  feed mill), group, owning company, region and coordinates. The reference data is
-  static for the whole run (no history of changes).
-- About 70% of moves between properties are under 10 km, with rare long moves (from
-  the paper's 71.3%).
-- Offline: about 5% of check-ins and check-outs arrive late, with
-  `received_time − event_time` up to **7 days** (a hard maximum).
-- Duplicates: about 2% of events are sent again with the **same event_id and body**,
-  at most 7 days after the original.
-- Every CheckOut belongs to a CheckIn that exists. There is **at most one** CheckOut
-  (one distinct event_id) per check-in. Check-out time ≥ check-in time.
-- Some visits have no check-out; downstream infers one (§5).
-- A person's visits do not overlap: each check-in comes after the previous visit's
-  check-out.
-- `additional_visitors` is an integer count (group check-in, "+N"). It is reported but
-  never expanded into movements or stand-down checks.
-- It emits only valid events on the normal path. `generate --poison K` sends K
-  malformed events with `detail.poison = true` to demonstrate the DLQ.
-- It writes `manifest.json`: mode, seed, and distinct event_id counts per event type.
-- `--local-out DIR` writes the same events as JSON lines, so dbt can be built and
-  tested without AWS.
+### 3.2 Runs: backfill, then live
+- **`generate --backfill`** (run once before the demo):
+  - 12 months of history ending at the wall-clock time when it starts.
+  - It saves the generator state (each person's last visit, the counters and the seed)
+    to `state/generator_state.json`.
+  - It takes tens of minutes on LocalStack.
+- **`generate --live N`**:
+  - Loads the generator state and **continues each person's timeline**.
+  - Emits N check-ins (plus their check-outs) with `event_time` in the last 30 minutes.
+    Some events are received up to 10 minutes late.
+  - About 20% of the live check-ins are deliberate stand-down breaches, so alerts
+    appear in the demo.
+  - It updates the generator state.
+- **Event ids:** `event_id = uuid5(run_id, sequence)`, so runs never collide.
+- **Manifests:** each run writes `manifests/<run_id>.json` (mode, seed, distinct
+  event_id counts per type). The checks sum all manifests.
 
-### 3.3 Events (`detail` of each EventBridge event)
+### 3.3 Generator guarantees (every run)
+- **Seed:** fixed, so output is reproducible.
+- **Default scale:** about 500 properties, 2,000 people, 100,000 check-ins.
+  - At most 300 check-ins per person across all runs.
+- **Properties:** type (poultry, pork, beef, dairy, kiwifruit, vineyard, office, feed
+  mill), group, `owner_company_id`, region, coordinates.
+  - The snapshot is static (no history of changes).
+- **Movement distance:** about 70% of moves between properties are under 10 km, with
+  rare long moves (from the paper's 71.3%).
+- **Offline:** about 5% of check-ins and check-outs arrive late.
+  `received_time − event_time` is at most 7 days in backfill and 10 minutes in live.
+- **Duplicates:** about 2% of events are sent again, same event_id and body.
+- **Check-outs:**
+  - Every CheckOut belongs to an existing CheckIn.
+  - There is **at most one** distinct CheckOut per check-in.
+  - check-in ≤ check-out ≤ check-in + **48 hours**.
+- **No overlap:** a person's visits don't overlap.
+- **`additional_visitors`:** an integer count. It is reported, never expanded into
+  movements or stand-down checks.
+- **Poison:** only valid events go on the normal path. `generate --poison K` sends K
+  malformed events with `detail.poison = true`, recorded in
+  `manifests/poison_<run_id>.json`.
+- **Local output:** `--local-out DIR` writes the generator events as JSON, runs
+  `local_sim` in received_time order, and writes its evaluation, applied and alert
+  events too. dbt can then be built and tested without AWS.
+
+### 3.4 Settling
+A run is **settled** when all of these hold:
+- S3 holds every manifest event.
+- S3 holds one CheckInEvaluated per distinct check-in and one CheckOutApplied per
+  distinct check-out.
+- The SQS queue shows 0 visible and 0 in-flight messages.
+
+The generator then waits one more Firehose buffer (60 s), writes
+`control/settled/<run_id>.json`, and exits. On a timeout it exits non-zero.
+
+### 3.5 Events (`detail` of each EventBridge event)
 
 | Event | Source | Fields |
 |---|---|---|
-| `CheckIn` | onside.app | event_id, person_id, company_id, property_id, event_time, received_time, method (app, geofence, qr, kiosk, link), job_type, additional_visitors, answers[] |
+| `CheckIn` | onside.app | event_id, person_id, visitor_company_id, property_id, event_time, received_time, method (app, geofence, qr, kiosk, link), job_type, additional_visitors, answers[] |
 | `CheckOut` | onside.app | event_id, checkin_event_id, person_id, property_id, event_time, received_time, method (manual, geofence_auto, end_of_day) |
 | `PlantMovement` | onside.app | event_id, source_property_id, dest_property_id, movement_date (local date), material_type, volume, received_time |
-| `CheckInEvaluated` | onside.standdown | event_id = hash("eval", checkin_event_id), checkin_event_id, person_id, detected_time, processed_at, origins_seen[] (origin checkin_event_id, end, end_source), breach (bool), rule_id, origin_checkin_event_id |
+| `CheckInEvaluated` | onside.standdown | event_id = hash("eval", checkin_event_id), checkin_event_id, person_id, version_read, version_committed, detected_time, processed_at, origins_seen[] (origin checkin_event_id, end, end_source, nights_between), breach, rule_id, origin_checkin_event_id, required_nights, nights_between |
+| `CheckOutApplied` | onside.standdown | event_id = hash("co", checkout_event_id), checkout_event_id, checkin_event_id, person_id, version_committed, processed_at |
 | `HighRiskVisitDetected` | onside.standdown | event_id = hash("alert", checkin_event_id), checkin_event_id, person_id, origin_property_id, dest_property_id, origin_checkin_event_id, nights_between, required_nights, rule_id, detected_time, processed_at |
 
 PlantMovement does not go to the Lambda. It is used only by tracing (§5).
 
-### 3.4 Reference data
-- The `properties` snapshot (property_id, type, group, company_id, region, lat, lon) is
-  written once, at setup, to both DynamoDB `properties` and S3 `ref/properties.json`.
+### 3.6 Reference data
+- The `properties` snapshot (property_id, type, group, owner_company_id, region, lat,
+  lon) is written once, at setup, to DynamoDB `properties` and S3
+  `ref/properties.json`.
 - People and companies are written to S3 `ref/` only.
 - `shared/standdown_rules.csv` has columns rule_id, from_type, to_type, scope
   (internal, external, any) and nights.
@@ -154,17 +185,18 @@ person with an observed check-in, where:
 1. **End of a visit for stand-down:**
    `end(O) = greatest(O.checkin_time, earliest check-out of O)`.
    - If no check-out is known, use `O.checkin_time`.
-   - Inferred check-outs (§5) are **never** used here.
+   - Inferred check-outs (§5) are never used here.
 2. **Nights:**
    `nights_between(O, D) = max(0, local_date(D.checkin_time) − local_date(end(O)))`,
-   as an integer, using local dates. Daylight-saving days need no special handling.
-3. **Window:** O counts only if `nights_between(O, D) ≤ 14`. Because every rule has
-   nights ≤ 14 and a breach needs `nights_between < nights`, the window never changes
-   the result. It only bounds the state.
-4. **Scope:** internal if O and D are owned by the same company, otherwise external.
+   as an integer of local dates.
+3. **Window:** O counts only if `nights_between(O, D) ≤ 14`. Every rule has nights ≤ 14
+   and a breach needs `nights_between < nights`, so the window never changes the
+   result.
+4. **Scope:** **internal** if `O.property.owner_company_id = D.property.owner_company_id`,
+   otherwise **external**. The visitor's company plays no part.
 5. **Rule for one (O, D) pair:** among the rules with from_type = O.type and
-   to_type = D.type, the **most specific** scope wins (the matching internal or
-   external rule beats `any`). If no rule matches, the pair has no constraint.
+   to_type = D.type, the most specific scope wins (the matching internal or external
+   rule beats `any`). If no rule matches, the pair has no constraint.
 6. **Breach of a pair:** `nights_between(O, D) < rule.nights`.
 7. **Result for D:** D is a breach if any pair breaches. The reported (origin, rule) is
    picked from the breaching pairs by:
@@ -181,22 +213,32 @@ movement (§5) is B→C, but A→C has 1 night against a 3-night rule, so C is a
 - adding a visit can only add breaching pairs;
 - a later `end(O)` can only reduce nights.
 
-The Lambda always sees a subset of the visits that batch sees, and for each one an
-`end` that is ≤ batch's end. A check-out not yet seen gives `end = checkin_time`, which
-is ≤ the real end. Because there is at most one distinct check-out per check-in (§3.2),
-"earliest seen" is the same as "earliest overall". So any breach that realtime finds,
-batch also finds. This needs §3.2's guarantees and the check-out uniqueness test
-(§6.3).
+The Lambda sees a subset of batch's origin candidates, and for each one an end that is
+≤ batch's end. A check-out not yet seen gives `checkin_time`, and there is at most one
+distinct check-out per check-in. Scope and rule choice depend only on the static
+snapshot. The (time, id) order is the same on both sides.
+
+**`origins_seen` bound.** Visits last at most 48 hours (§3.3). So any origin batch could
+find breaching has `local_date(D) − local_date(O.checkin) ≤ 16`. The evaluation
+records every observed origin candidate inside that bound, **before** the 14-night
+filter, each with the end and nights the Lambda used.
 
 ## 5. dbt models
 
 ### Staging
 - `stg_checkins`, `stg_checkouts`, `stg_plant_movements`, `stg_evaluations`,
-  `stg_realtime_alerts`.
-- Read raw objects with `read_json(..., format='newline_delimited')` over an explicit
-  glob, from S3 or from `--local-out`, chosen by the target.
-- Deduplicate: events on event_id; evaluations and alerts on checkin_event_id.
-- Cast types and add local times.
+  `stg_checkout_applied`, `stg_realtime_alerts`.
+- **Reading:**
+  - Raw objects are full EventBridge envelopes, concatenated by Firehose with no
+    delimiter.
+  - Read them with `read_json(glob, format='unstructured', columns={...})`, declaring
+    `detail` as JSON (no schema inference). Then extract the fields per detail-type.
+  - The source is S3 or `--local-out`, chosen by the target.
+- **Filtering and dedupe:**
+  - Drop any row with `detail.poison`.
+  - Deduplicate events on event_id. Evaluations, applied events and alerts go on their
+    natural key: checkin_event_id, checkout_event_id and checkin_event_id. Their bodies
+    are identical; the tie-break is earliest `processed_at`.
 
 ### Intermediate
 `int_visits` has one row per check-in. Columns:
@@ -211,6 +253,9 @@ batch also finds. This needs §3.2's guarantees and the check-out uniqueness tes
 
 ### Marts
 - **`fct_high_risk_visits`:** the §4 result, one row per breaching checkin_event_id.
+  - The SQL lives in a macro, `standdown(visits_relation, properties_relation,
+    rules_relation)`.
+  - The golden-case test (§6.3) calls the same macro.
 - **`fct_movements`:** consecutive visits by the same person, ordered by
   (checkin_time, checkin_event_id), at different properties (no self-loops).
   - Timing uses `visit_end` (inferred allowed). `gap_hours = D.checkin − O.visit_end`,
@@ -221,27 +266,31 @@ batch also finds. This needs §3.2's guarantees and the check-out uniqueness tes
 - **`fct_alert_reconciliation`:** see §6.2.
 - **`fct_network_edges_monthly`:** origin → destination per month. The weight is the
   average daily movements, as in the paper.
-- **`dim_property_network`** (dbt Python model, networkx): built from **all 12 months**
-  of people movements, with edge weight = movement count. Columns: in-degree,
-  out-degree, weighted strength, weighted PageRank. This is the demo's "key property
-  identification".
+- **`dim_property_network`** (dbt Python model, networkx): built from all people
+  movements, with edge weight = movement count. Columns: in-degree, out-degree,
+  weighted strength, weighted PageRank. This is "key property identification".
 
 ### Tracing
-A Dagster job with config property_id, start_time and max_hops (default 3).
-- **Output:** for each reachable property, its **earliest arrival time**, its hop
-  count, and one witness path. Paths are never enumerated.
+A Dagster job with config property_id, start_time and max_hops (default 3). It opens
+DuckDB read-only.
 - **Edges:**
   - **People:** `connected` movements. Departure = the origin `visit_end`
     (inferred allowed). Arrival = the destination check-in.
   - **Plant material:** departure = start of `movement_date` (local), arrival = end of
     `movement_date`.
-- **A hop is valid** when `departure ≥ arrival_time(origin)`. The seed property's
-  arrival time is `start_time`.
-- **Algorithm:** up to `max_hops` rounds in DuckDB.
-  - Each round relaxes the edges out of the properties whose arrival improved in the
-    previous round.
-  - It keeps the minimum arrival per property, with the predecessor as the witness.
-  - It stops early when nothing improves.
+- **A hop is valid** when `departure ≥ arr(origin)`.
+- **Algorithm:** a hop-limited Bellman-Ford over layers r = 0..max_hops.
+  - Start: `arr_0(seed) = start_time`, and every other property is unreachable.
+  - Each round: `arr_r(v) = min(arr_{r−1}(v), min over valid edges u→v of arrival)`,
+    where validity is checked against `arr_{r−1}(u)`.
+  - Only properties that improved in round r−1 are relaxed in round r.
+  - Stop early when nothing improves.
+- **Witness:** stored per layer in `pred(r, v)`.
+  - If `arr_r(v) = arr_{r−1}(v)`, it inherits `pred(r−1, v)`.
+  - Otherwise it is `(u, r−1)`.
+  - Following it backwards gives a path of at most r hops.
+- **Output:** for each reachable property: `arr_max(v)`, its witness path, and
+  hops = the path's length.
 
 All models are rebuilt in full. The README explains the production alternative:
 incremental by received_time, a lookback window, and recomputing the affected people.
@@ -249,61 +298,74 @@ incremental by received_time, a lookback window, and recomputing the affected pe
 ## 6. Error handling and data quality
 
 ### 6.1 Lambda `standdown_checker`
-- **Queue:** SQS standard queue with partial batch responses (`ReportBatchItemFailures`).
-  Delivery order is **not** assumed: EventBridge does not guarantee it, so the handler
-  is order-independent.
-- **State:** one `person_state` item per person, holding:
-  - `version`
-  - `watermark`
-  - `visits[]`, each with checkin_event_id, property_id, type, company_id,
-    checkin_time, checkout_event_id, checkout_time and evaluation.
-  - A placeholder visit has no check-in yet (see CheckOut below).
-- **Processing one record:**
-  1. Validate. If invalid, the record fails. After 3 receives it moves to the DLQ.
-     Only `poison` events should ever reach the DLQ.
-  2. Load the person item (with `version`).
-  3. **CheckIn:**
-     - If its event_id is already in `visits[]`: it is a duplicate or a redelivery.
-       Go to step 6 and re-emit the stored evaluation.
-     - Otherwise look up the property type and company (cached), evaluate per §4 against
-       the non-placeholder visits, and insert the visit at its sorted position.
-     - If a placeholder with the same checkin_event_id exists, merge into it.
-  4. **CheckOut:** find the visit by `checkin_event_id`.
-     - If none exists, create a placeholder visit holding only the check-out.
-       Placeholders are never origins (§4 requires an observed check-in).
-     - If the visit already has a check-out, keep the earlier one.
-     - Re-receiving the same event_id changes nothing.
-  5. Update the watermark, then trim. Drop visits whose local end date is more than
-     **22 nights** before the watermark: 14 for the window, plus 7 for the maximum
-     lateness, plus 1 for safety. **Commit** with one conditional write
-     (`version = :expected`).
-     - On a version conflict, reload and retry, up to 3 times. After that, fail the
-       record so it is redelivered.
-     - Recording a processed event and committing are the same write, so a crash
-       before the commit just means a redelivery.
-  6. **After the commit**, call PutEvents with `CheckInEvaluated` and, for a breach,
-     `HighRiskVisitDetected`.
-     - Their event_ids are deterministic, so re-emitting is harmless; staging
-       deduplicates on checkin_event_id.
-     - If PutEvents fails, the record fails. The redelivery hits the duplicate path in
-       step 3 and re-emits.
-- **Duplicates arrive within the retention window.** The generator guarantees a gap of
-  at most 7 days, which is less than the 22 nights kept. So the dedupe in step 3 always
-  finds the original.
+
+**Queue.** SQS standard queue with `ReportBatchItemFailures`, and the DLQ after 5
+receives. Delivery order is **not** assumed, so the processor is order-independent.
+
+**State.**
+- **`person_state`**, one item per person:
+  - `version`;
+  - `visits[]`, each with checkin_event_id, property_id, type, owner_company_id,
+    checkin_time (null for a placeholder), checkout_event_id, checkout_time and
+    checkout_applied_version.
+  - **No trimming.** At most 300 visits × about 150 bytes is under 50 KB, against the
+    400 KB item limit. Production would trim and keep dedupe in a separate store; the
+    README names this.
+- **`evaluations`**, one item per checkin_event_id: the full CheckInEvaluated body.
+
+**Commit.** Each change is one `TransactWriteItems` call:
+- an update of `person_state` with the condition `version = :read`, which sets
+  `version = :read + 1`;
+- for a check-in, a put of the evaluation with the condition
+  `attribute_not_exists(checkin_event_id)`.
+
+On a conflict, the processor reloads and retries up to 3 times, then fails the record.
+
+**Processing one record:**
+1. **Validate.** If invalid, the record fails (only poison events should).
+2. **Load** `person_state` and remember `version_read`.
+3. **CheckIn X:**
+   - **Already processed** (an evaluation for X exists): re-emit the stored evaluation
+     and, for a breach, its alert. Done.
+   - **Otherwise:**
+     - Look up the property (cached).
+     - Evaluate per §4 against the visits with an observed check-in.
+     - Insert X at its sorted position, or fill the placeholder for X if one exists
+       (keeping its check-out).
+     - Commit the visit and the evaluation together.
+   - The duplicate test is "an evaluation exists", never "the id is in visits[]", so a
+     placeholder is never mistaken for a processed check-in.
+4. **CheckOut C for check-in X:**
+   - If C is already applied to X: re-emit CheckOutApplied with the stored version.
+     Done.
+   - If X exists in visits[] (placeholder or not): record C, keeping the earliest if
+     the visit already has a check-out.
+   - Otherwise: create a placeholder for X holding C.
+   - Commit, storing `checkout_applied_version = version_committed`.
+5. **After the commit:** PutEvents. A non-zero `FailedEntryCount` counts as a failure.
+   - Bodies come from stored data, so re-emitting is byte-identical.
+   - On failure the record fails. The redelivery takes the "already processed" path
+     and re-emits.
+
+**Why redelivery is safe.** Nothing is trimmed, so a redelivered or duplicated event
+always finds its own committed result. The PutEvents and visibility-timeout delays don't
+matter.
 
 ### 6.2 Reconciliation (`fct_alert_reconciliation`)
-
-One row per checkin_event_id that is a breach on either side, joined to
-`stg_evaluations`.
+- **Realtime breach** means `stg_evaluations.breach = true`. A test checks that an
+  alert exists if and only if `breach = true`.
+- **Rows:** one per checkin_event_id that is a breach on either side.
+- **Missed rows:** O* is batch's reported origin. Versions belong to the same person
+  item, so "committed after D was read" means `version_committed > D.version_read`.
 
 | Class | Rule | Expectation |
 |---|---|---|
-| `matched` | Both sides breach. `same_attribution` compares rule_id and origin, for information. `late_alert = (received_time − event_time > 1 h)` for D. | Most rows |
-| `missed` / `origin_not_seen` | Batch's origin is not in the evaluation's `origins_seen`. `origin_was_late` says whether that origin arrived after D was evaluated. | Some |
-| `missed` / `origin_end_not_seen` | Batch's origin was seen, but with an earlier end, because its CheckOut wasn't seen yet. | Few |
-| `missed` / `not_evaluated` | No evaluation exists for D. | **Must be 0** |
-| `missed` / `unexplained` | Anything else. | **Must be 0** |
-| `false_alert` | Realtime breaches, batch doesn't. | **Must be 0** |
+| `matched` | Both breach. Info columns: `same_attribution` (rule_id and origin), and `late_alert = (D.received_time − D.event_time > 1 h)`. | Most rows |
+| `missed` / `origin_not_seen` | O* is not in `origins_seen`, **and** O*'s evaluation has `version_committed > D.version_read`. Sub-cause: `offline` if O*.received_time > D.received_time, otherwise `reordered`. | Some |
+| `missed` / `origin_end_not_seen` | O* is in `origins_seen` with `end_source = checkin`, **and** O*'s CheckOutApplied has `version_committed > D.version_read`. | Few |
+| `missed` / `not_evaluated` | No evaluation for D. | **Must be 0** |
+| `missed` / `unexplained` | Anything else, including a version proof that fails. | **Must be 0** |
+| `false_alert` | Realtime breach, batch no breach. | **Must be 0** |
 
 ### 6.3 Tests
 - **Generic dbt tests:**
@@ -313,62 +375,69 @@ One row per checkin_event_id that is a breach on either side, joined to
   - (from_type, to_type, scope) unique in the rules seed.
 - **Singular dbt tests:**
   - at most one distinct check-out per checkin_event_id;
-  - check-out ≥ check-in;
+  - check-in ≤ check-out ≤ check-in + 48 h;
   - movement origin ≠ destination;
   - every rule has 1 ≤ nights ≤ 14;
-  - no evaluated check-in has an origin outside the 14-night window that breaches.
-- **Golden cases:** `shared/golden_cases.csv` is loaded as a seed. A singular test runs
-  the dbt nights and stand-down macros over it and compares with the expected column.
-  Pytest runs `rules.py` over the same file.
-- **dbt unit tests** (SQL models): the inferred check-out in `int_visits`, the
-  stand-down pick in `fct_high_risk_visits`, and the reconciliation classes.
-- **Reconciliation:**
-  - `false_alert`, `not_evaluated` and `unexplained` = 0, at error level;
-  - the missed rate above a threshold, at warn level.
+  - every evaluation's `origins_seen` equals the batch origin candidates within the
+    16-day bound whose versions are ≤ version_read.
+  - alert iff `breach = true`;
+  - completeness: one evaluation per check-in and one applied event per check-out.
+- **Golden cases** (`shared/golden_cases.csv`, pure rules only):
+  - Columns: case_id, role (origin or target), visit_id, property_type,
+    owner_company_id, checkin_time, checkout_time, expected_breach, expected_rule_id,
+    expected_origin_visit_id.
+  - Cases: daylight saving, an intervening visit, most-specific scope, the pick order,
+    the window edge, clipping at 0, no matching rule.
+  - Pytest runs `rules.py` over it. A dbt singular test runs the `standdown` macro
+    over the seed and compares.
+- **dbt unit tests** (SQL models): inferred check-outs in `int_visits`, and every
+  class in `fct_alert_reconciliation`.
+- **Reconciliation:** `false_alert`, `not_evaluated` and `unexplained` = 0 at error
+  level; the missed rate above a threshold at warn level.
 
-### 6.4 Dagster asset checks
-- **Completeness:**
-  - Distinct event_ids per type in S3 equal `manifest.json`, for CheckIn, CheckOut and
-    PlantMovement only.
-  - Evaluations equal distinct check-ins.
-  - Runs only after the generator's flush wait.
-- **DLQ:** the DLQ holds only messages with `poison = true`, read through boto3.
-- **Freshness:** live mode only. The latest received_time is within 15 minutes of now.
-  In backfill mode the check is skipped.
+### 6.4 Dagster
+- **Sensor:** fires on new `control/settled/` objects, never on raw objects. A
+  schedule exists as a backup.
+- **Concurrency:** dbt runs and the trace job share a concurrency pool of size 1, to
+  avoid DuckDB file-lock conflicts.
+- **Asset checks:**
+  - **Completeness:** distinct event_ids per type in S3 equal the summed manifests,
+    for CheckIn, CheckOut and PlantMovement.
+  - **DLQ:** `ApproximateNumberOfMessages` equals the summed poison manifests. Read
+    the attribute only; never receive messages.
+  - **Freshness:** after a live run, the latest received_time is within 15 minutes of
+    the settle time. Skipped for backfill.
 
-### 6.5 Firehose specifics
-- The EventBridge target uses an input transformer, template `<aws.events.event>` plus
-  a newline. That gives one event per line.
-- The buffer is 60 s / 1 MB. The default S3 prefix is the arrival hour; partitioning by
-  event date is left out.
+### 6.5 Firehose
+- Rule B targets Firehose with **no input transformer**, so the full EventBridge
+  envelope, including `detail`, is delivered.
+- Records are concatenated without a delimiter; staging reads them with
+  `format='unstructured'`.
+- The buffer is 60 s / 1 MB. The default prefix is the arrival hour.
 - Delivery is at least once, so staging deduplicates.
-- The generator ends by polling S3 until the counts match the manifest, or a timeout
-  passes.
+- Day 1 verifies the delivery and the DuckDB read on LocalStack.
 
 ## 7. Testing strategy
 
 1. **Unit (pytest, TDD):**
-   - `rules.py` over `golden_cases.csv`:
-     - daylight saving;
-     - an intervening visit;
-     - most-specific scope;
-     - the pick order;
+   - `rules.py` over the golden cases.
+   - `processor.py` over the in-memory store:
      - late insert;
-     - placeholder exclusion;
-     - window edge;
-     - clipping at 0.
-   - `handler.py` with moto:
-     - dedupe and redelivery re-emit;
-     - an orphan CheckOut followed by its CheckIn;
-     - a version conflict and retry;
+     - a placeholder followed by its CheckIn (evaluated, not skipped);
+     - duplicate and redelivery re-emitting byte-identical bodies;
+     - earliest check-out kept;
+     - the `origins_seen` bound.
+   - `dynamo_store.py` and `handler.py` with moto:
+     - a transaction conflict and retry;
      - partial batch failure;
-     - trimming.
-2. **dbt:** the tests in §6.3. The CI target reads `--local-out` files.
-3. **Integration:** the full chain on LocalStack. Send a small fixed event set,
-   including out-of-order and duplicate cases, then assert the person_state items, the
-   S3 objects, and the evaluations and alerts.
-4. **Parity:** over the full generated dataset, `false_alert`, `not_evaluated` and
-   `unexplained` = 0.
+     - `FailedEntryCount` treated as a failure.
+2. **dbt:** the tests in §6.3. The CI target reads `--local-out` files, including the
+   simulator's evaluations, so reconciliation runs in CI too.
+3. **Integration:** the full chain on LocalStack. Send a small fixed set including
+   out-of-order, duplicate, orphan check-out and poison cases. Wait for settling. Then
+   assert person_state, evaluations, the S3 objects and the DLQ count.
+4. **Parity:** over the full generated dataset, on both `--local-out` and LocalStack:
+   `false_alert`, `not_evaluated` and `unexplained` = 0.
 
 ## 8. CI/CD and deployment
 
@@ -384,74 +453,105 @@ One row per checkin_event_id that is a breach on either side, joined to
   - Region ap-southeast-2, local Terraform state.
   - A $5 budget alarm is created first; `make destroy` runs after the screenshots,
     which are stored in `docs/`.
-  - Lambda is packaged with `archive_file` (stdlib plus boto3 from the runtime).
+  - Lambda packaged with `archive_file` (stdlib, tzdata, boto3 from the runtime).
 - **LocalStack:** since release 2026.03.0, the single image needs
   `LOCALSTACK_AUTH_TOKEN`. Day 1 decides between the free hobby token and pinning a
   pre-2026.03 4.x tag.
-  - Fallback if neither works: run the handler in-process against moto through a local
-    driver. That is a **reduced** demo; the full chain is then shown only on real AWS.
+  - Fallback if neither works: `--local-out` with `local_sim` covers everything except
+    the AWS wiring. That is a reduced demo; the full chain is then shown only on real
+    AWS.
 
 ## 9. Demo script (about 5 minutes)
 
-Before the demo, `make generate MODE=backfill` and one Dagster run are already done.
+Before the demo, `make generate MODE=backfill` has settled and Dagster has run once.
 
 1. The README architecture and how it maps to Onside: check-ins, stand-down, Tracing,
    "Key property identification" (30 s).
 2. `make generate MODE=live N=50`: events flow, and HighRiskVisit alerts appear in the
-   Lambda logs (1 min).
-3. Dagster UI: lineage, a run, green checks (1 min).
-4. Reconciliation: "X breaches were missed in real time because the origin was
-   offline. Here is the evidence from the evaluation log. That's why the warehouse
-   recomputes on event_time." (1.5 min)
+   Lambda logs. The run settles in about 2 minutes (1 min shown).
+3. Dagster UI: the sensor-triggered run, lineage, green checks (1 min).
+4. Reconciliation: "X breaches were missed in real time. Y because the origin was
+   offline, Z because of delivery order. Here is the version evidence. That's why the
+   warehouse recomputes on event_time." (1.5 min)
 5. `make trace`: the earliest arrival per downstream property, then the PageRank key
    properties (1 min).
-6. Production next steps: incremental models with a lookback, Iceberg + Athena,
-   ClickHouse for customer-facing reports, rules per property and group plus outbreak
-   overrides, data residency (30 s).
+6. Production next steps: incremental models with a lookback, state trimming with a
+   separate dedupe store, Iceberg + Athena, ClickHouse for customer-facing reports,
+   rules per property and group plus outbreak overrides, data residency (30 s).
 
 ## 10. Schedule
 
 | Day | Work |
 |---|---|
-| D1 | Repo, LocalStack decision, generator (including `--local-out`), `rules.py` with golden cases |
-| D2 | Terraform and the Lambda handler with moto tests; LocalStack integration if time |
-| D3 | dbt models and tests on `--local-out` data, including reconciliation; LocalStack integration if not done |
-| D4 | dbt on S3, Dagster (assets, checks, trace job), CI |
-| D5 | Real AWS deploy, README, demo rehearsal |
+| D1 | Repo; LocalStack decision; check Firehose → S3 → DuckDB on LocalStack; generator; `rules.py` with golden cases |
+| D2 | `processor.py` + `local_sim` (TDD), so `--local-out` produces evaluations; start Terraform |
+| D3 | dbt models and tests on `--local-out` data, including reconciliation |
+| D4 | Terraform finished, DynamoDB store, handler, LocalStack integration, settling |
+| D5 | Dagster (sensor, checks, trace), CI, real AWS deploy, README, rehearsal |
+
+D5 is tight. The cut line protects it.
 
 **Cut line**, in this order, if time runs short:
 1. plant-material edges in tracing;
-2. the S3 sensor (keep the schedule only);
-3. the network Python model;
-4. the Firehose path. In that case the generator writes raw files to S3 directly, and
-   evaluations still go through EventBridge.
+2. the network Python model;
+3. the S3 sensor (keep the schedule only);
+4. the Firehose path. In that case the Lambda and the generator write their events
+   to S3 directly.
 
 ## 11. Decisions
 
 - **Standard SQS rather than FIFO.** EventBridge does not guarantee order, so FIFO
-  would not give per-person order anyway. It also complicates partial batch failure
-  (the batch must stop at the first failure). Order independence plus optimistic
-  locking is the real guarantee.
-- **Evaluations are logged** (`CheckInEvaluated`), so every missed alert has evidence
-  and an explained cause, not one guessed from timestamps.
+  would not give per-person order anyway, and it complicates partial batch failure.
+  Order independence plus version-checked commits is the real guarantee.
+- **Evaluations are logged with versions**, so every missed alert has an explained,
+  provable cause, not one guessed from clocks or timestamps.
 - **The stand-down end ignores inferred check-outs.** This keeps the realtime side a
-  subset of batch, so the "realtime can only miss" guarantee (§4) holds.
+  subset of batch, so "realtime can only miss" holds (§4).
+- **No state trimming.** Bounded by the generator's 300 check-ins per person. This
+  removes a whole class of redelivery bugs from the demo; production trimming is a
+  named next step.
+- **One processor, two stores.** The Lambda and the local simulator share
+  `processor.py`, so CI can run reconciliation without AWS.
 
 ## 12. Review log
 
-**Review 1 (2026-10-09): 9 blocking issues, all fixed in this revision.**
+**Review 1: 9 blocking issues, fixed in revision 2.**
+
+| # | Issue |
+|---|---|
+| B1 | No time model for the replay |
+| B2 | Window anchor ambiguous |
+| B3 | Dedupe written before the work was committed |
+| B4 | Check-out matching undefined |
+| B5 | No source of reference data for the Lambda |
+| B6 | Rule selection and grain ambiguous |
+| B7 | False FIFO ordering assumption |
+| B8 | Miss causes unprovable |
+| B9 | Tracing undefined and exploding |
+
+**Review 2: 9 blocking issues, fixed in revision 3.**
 
 | # | Issue | Fix |
 |---|---|---|
-| B1 | No time model for the replay | §3.1 |
-| B2 | Window anchor ambiguous | §4.3, §6.1 trimming |
-| B3 | Dedupe written before the work was committed | §6.1 steps 3–6 |
-| B4 | Check-out matching undefined | §4.1, §6.1 step 4, §3.2 |
-| B5 | No source of reference data for the Lambda | §3.4 |
-| B6 | Rule selection and grain ambiguous | §4.5–4.8 |
-| B7 | False FIFO ordering assumption | §6.1, §11 |
-| B8 | Miss causes unprovable, no catch-all | §6.2, CheckInEvaluated |
-| B9 | Tracing undefined and exploding | §5 Tracing |
+| B-1 | A placeholder was taken for a duplicate CheckIn | §6.1 step 3: duplicate means "an evaluation exists" |
+| B-2 | The Firehose input transformer dropped `detail` | §6.5: no transformer; `format='unstructured'` |
+| B-3 | Trimming broke redelivery and dedupe | §6.1: no trimming; separate `evaluations` table; transactional commit |
+| B-4 | Loose miss classes; `origins_seen` undefined | §4 bound; §6.2 version proofs; CheckOutApplied |
+| B-5 | Evaluations arrive after check-ins | §3.4 settling; sensor on `control/settled/` |
+| B-6 | `--local-out` had no evaluations | `local_sim` sharing `processor.py` |
+| B-7 | Poison events reached S3 and staging | Event pattern exclusion plus a staging filter |
+| B-8 | Live mode's relation to backfill undefined | §3.2: continuation, uuid5 ids, per-run manifests |
+| B-9 | Witness path and hop count could disagree | §5: per-layer predecessors |
 
-Non-blocking N2–N11 and N13–N14 were also adopted. N1 and N12 no longer apply after
-the switch to standard SQS.
+Non-blocking items from review 2 were also adopted:
+- N1: `owner_company_id`.
+- N2: alert iff breach.
+- N3: the window test replaced.
+- N4: golden CSV schema and a shared macro.
+- N5: tzdata bundled.
+- N6: `FailedEntryCount` checked.
+- N7: DLQ after 5 receives; the attribute is read, never received.
+- N8: explicit columns.
+- N9: concurrency pool, read-only trace.
+- N10: cut item 4.
+- N11: offline and reordered split.
