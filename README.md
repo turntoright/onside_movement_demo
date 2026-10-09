@@ -3,8 +3,9 @@
 Farm check-ins and movements between properties become biosecurity alerts in real time: an
 AWS event chain (EventBridge, SQS, Lambda, DynamoDB, S3). A warehouse built by Dagster and
 dbt then recomputes every alert, explains each one that real time missed, and traces how a
-disease could have spread. It runs offline on a laptop through LocalStack, and the same
-Terraform deploys it to AWS. Design: `docs/superpowers/specs/2026-10-09-onside-movement-demo-design.md`.
+disease could have spread. It runs offline on a laptop through LocalStack. The same Terraform
+is ready for AWS, with a runbook prepared but not yet run. Design:
+[docs/superpowers/specs/2026-10-09-onside-movement-demo-design.md](docs/superpowers/specs/2026-10-09-onside-movement-demo-design.md).
 
 ## What it maps to in Onside
 
@@ -40,7 +41,7 @@ flowchart LR
   landed in `raw/`, then writes a few compacted NDJSON files and `control/settled/<run>.json`.
 - **Warehouse:** the Dagster sensor sees the settled record and runs `dbt build` (models, dbt
   tests as asset checks, plus completeness, dead-letter-queue and freshness checks). dbt and
-  the trace job share one concurrency pool, so DuckDB never has two writers.
+  the trace job share one concurrency pool, so only one process opens the DuckDB file at a time.
 
 ## Quick starts
 
@@ -54,7 +55,8 @@ flowchart LR
 
     make integration                        # the spec §7.3 test on a fresh stack; it WIPES the
                                             # current stack and backfill, so run it first (about 5 min)
-    make up                                 # a fresh, empty LocalStack (also wipes state/local)
+    make up                                 # a fresh, empty LocalStack; also wipes state/local,
+                                            # data/local and warehouse/local.duckdb
     make deploy ENV=local                   # Terraform: 26 resources
     make setup ENV=local                    # reference data -> S3 ref/ and DynamoDB
     make generate ENV=local MODE=backfill   # a year of history: emit, settle, compact (about 19 min)
@@ -68,9 +70,10 @@ online run of the quick start (image pulls, `make venv`, the Terraform providers
 `make deploy`, DuckDB's httpfs install), the demo runs with the network off; this was proved
 with `unshare -rn` (see Results).
 
-**AWS (once, for the screenshots):** follow `docs/aws-deploy.md`. It creates a US$5 budget
-first (`make budget`), deploys the same Terraform (`make deploy ENV=aws`), runs a small
-dataset, and tears it all down. Nothing in this repo touches AWS unless `ENV=aws` is given.
+**AWS (prepared, not yet run):** the runbook [docs/aws-deploy.md](docs/aws-deploy.md)
+creates a US$5 budget first (`make budget ENV=aws AWS_ACCOUNT_ID=<id> BUDGET_EMAIL=<address>`),
+deploys the same Terraform (`make deploy ENV=aws AWS_ACCOUNT_ID=<id>`), runs a small dataset,
+and tears it all down. Nothing in this repo touches AWS unless `ENV=aws` is given.
 
 ## Demo script (about 5 minutes)
 
@@ -88,6 +91,8 @@ run once. Keep `make dagster ENV=local` running in its own terminal.
    settled in 72 s (105 s in the offline rehearsal). After the backfill, `make alerts ENV=local`
    began with
    `1029 alert log lines, 1008 distinct alerts (by checkin_event_id; repeats are redeliveries or duplicate events)`.
+   Each live run adds its own alerts on top of these after-backfill numbers, so the counts
+   you see during the demo are higher.
 3. **Dagster (1 min).** The `settled_runs` sensor (every 30 s) starts a `dbt_build` run; in
    the offline rehearsal it succeeded 84 s after the live run settled. Show the lineage, the
    run, and the 51 green checks: the dbt tests plus, on `stg_events`, completeness against the
@@ -96,10 +101,14 @@ run once. Keep `make dagster ENV=local` running in its own terminal.
 
         .venv/bin/python -c "import duckdb; print(duckdb.connect('warehouse/local.duckdb', read_only=True).sql('select status, cause, sub_cause, count(*) from fct_alert_reconciliation group by all order by all'))"
 
-   "X breaches were missed in real time: Y because the origin check-in was still offline,
-   Z because of delivery order. Each has version evidence. That is why the warehouse
-   recomputes on event time." Run the query between Dagster runs: DuckDB allows one writing
-   process, and Dagster holds the file only while a run is in the `duckdb` pool.
+   Read the causes off the output: "X breaches were missed in real time: Y because the
+   origin check-in was still offline (`origin_not_seen`, `offline`), Z because of delivery
+   order: the origin's check-out had not been processed yet (`origin_end_not_seen`), or the
+   origin check-in arrived first but was processed later (`origin_not_seen`, `reordered`).
+   Each has version evidence. That is why the warehouse recomputes on event time." After the
+   backfill the output was 40 `offline`, 4 `origin_end_not_seen` and no `reordered` row. Run
+   the query between Dagster runs: DuckDB allows one writing process, and Dagster holds the
+   file only while a run is in the `duckdb` pool.
 5. **Tracing and key properties (1 min).**
 
         make trace ENV=local PROPERTY=P0172 START=2026-06-01T00:00:00+12:00
@@ -113,7 +122,7 @@ run once. Keep `make dagster ENV=local` running in its own terminal.
 6. **Production next steps (30 s).** The list below.
 
 Dead-letter queue, last: `make poison ENV=local K=2` sends malformed events, which reached the
-visit DLQ 3 min 02 s later in the recorded run; the next `dbt_build` run's
+visit DLQ 3 min 02 s later (offline rehearsal); the next `dbt_build` run's
 `dead_letter_queues` check then reports 2 poison messages and passes. The poison records are
 written first, so a `dbt_build` run in those 3 minutes has a red DLQ check: run poison after
 the other steps. DLQ messages expire after 14 days while the poison records stay, so rebuild
@@ -130,7 +139,7 @@ Measured on a 4-CPU laptop with LocalStack, at the `local` scale (200 properties
 | Reconciliation (after the backfill) | 1,008 matched, equal to the 1,008 distinct alerts from `make alerts` at the same moment; 44 missed, each with a version-proven cause: 40 origin offline, 4 origin check-out not yet seen (none reordered in this run); 0 false alerts, 0 not evaluated, 0 unexplained |
 | Live run of 50 | settled in 72 s with 10 breaches; the sensor's next run passed 51/51 checks, freshness lag 4.6 min |
 | Trace | P0172: 62 properties within 3 hops in 18.4 s, identical to `python -m tracing` on the same warehouse; submitted during a `dbt_build` run, it waited for the `duckdb` pool (no lock error) |
-| Poison K=2 | reached the visit DLQ in 3 min 02 s; the next `dead_letter_queues` check passed (2 injected, 2 in the visit DLQ) |
+| Poison K=2 | reached the visit DLQ in 3 min 02 s (offline rehearsal); the next `dead_letter_queues` check passed (2 injected, 2 in the visit DLQ) |
 | Offline rehearsal | deploy (0 changes), Dagster, a live run of 50 (settled in 105 s), the sensor's `dbt_build` (51/51), trace and poison: 514 s in total, under `unshare -rn` with only LocalStack relayed |
 
 ## Testing
