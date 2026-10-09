@@ -1,6 +1,14 @@
 version: 2
 
 models:
+  - name: fct_alert_reconciliation
+    columns:
+      - name: checkin_event_id
+        data_tests: [unique, not_null]
+      - name: status
+        data_tests:
+          - accepted_values:
+              arguments: {values: [matched, missed, false_alert]}
   - name: fct_high_risk_visits
     columns:
       - name: checkin_event_id
@@ -28,6 +36,9 @@ unit_tests:
           - {checkin_event_id: d4, origin_checkin_event_id: o4, rule_id: R02}
           - {checkin_event_id: d5, origin_checkin_event_id: o5, rule_id: R02}
           - {checkin_event_id: d6, origin_checkin_event_id: o6, rule_id: R02}
+          - {checkin_event_id: d8, origin_checkin_event_id: o8, rule_id: R02}
+          - {checkin_event_id: d9, origin_checkin_event_id: o9, rule_id: R02}
+          - {checkin_event_id: d10, origin_checkin_event_id: o10a, rule_id: R02}
       - input: ref('stg_evaluations')
         rows:
           - {checkin_event_id: d1, breach: true, rule_id: R02, origin_checkin_event_id: o1, version_read: 5, version_committed: 6}
@@ -40,12 +51,21 @@ unit_tests:
           - {checkin_event_id: d6, breach: false, version_read: 3, version_committed: 4}
           - {checkin_event_id: o6, breach: false, version_read: 4, version_committed: 5}
           - {checkin_event_id: d7, breach: true, rule_id: R02, origin_checkin_event_id: o7, version_read: 2, version_committed: 3}
+          - {checkin_event_id: d8, breach: false, version_read: 6, version_committed: 7}
+          - {checkin_event_id: o8, breach: false, version_read: 1, version_committed: 2}
+          - {checkin_event_id: d9, breach: false, version_read: 6, version_committed: 7}
+          - {checkin_event_id: o9, breach: false, version_read: 1, version_committed: 2}
+          - {checkin_event_id: d10, breach: true, rule_id: R02, origin_checkin_event_id: o10b, version_read: 6, version_committed: 7}
       - input: ref('stg_evaluation_origins')
         rows:
           - {target_checkin_event_id: d3, origin_checkin_event_id: o3, end_source: checkin}
+          - {target_checkin_event_id: d8, origin_checkin_event_id: o8, end_source: checkin}
+          - {target_checkin_event_id: d9, origin_checkin_event_id: o9, end_source: checkout}
       - input: ref('stg_checkout_applied')
         rows:
           - {checkin_event_id: o3, checkout_event_id: o3-out, version_committed: 5}
+          - {checkin_event_id: o8, checkout_event_id: o8-out, version_committed: 4}
+          - {checkin_event_id: o9, checkout_event_id: o9-out, version_committed: 8}
       - input: ref('stg_checkins')
         rows:
           - {event_id: d1, checkin_time: "2026-03-03 09:00:00+13", received_time: "2026-03-03 11:00:00+13"}
@@ -53,6 +73,7 @@ unit_tests:
           - {event_id: o2, checkin_time: "2026-03-02 09:00:00+13", received_time: "2026-03-04 09:00:00+13"}
           - {event_id: d6, checkin_time: "2026-03-03 09:00:00+13", received_time: "2026-03-03 09:00:30+13"}
           - {event_id: o6, checkin_time: "2026-03-02 09:00:00+13", received_time: "2026-03-02 09:00:10+13"}
+          - {event_id: d10, checkin_time: "2026-03-03 09:00:00+13", received_time: "2026-03-03 09:00:10+13"}
     expect:
       rows:
         - {checkin_event_id: d1, status: matched, cause: null, sub_cause: null, same_attribution: true, late_alert: true}
@@ -62,3 +83,6 @@ unit_tests:
         - {checkin_event_id: d5, status: missed, cause: unexplained, sub_cause: null, same_attribution: null, late_alert: null}
         - {checkin_event_id: d6, status: missed, cause: origin_not_seen, sub_cause: reordered, same_attribution: null, late_alert: null}
         - {checkin_event_id: d7, status: false_alert, cause: null, sub_cause: null, same_attribution: null, late_alert: null}
+        - {checkin_event_id: d8, status: missed, cause: unexplained, sub_cause: null, same_attribution: null, late_alert: null}
+        - {checkin_event_id: d9, status: missed, cause: unexplained, sub_cause: null, same_attribution: null, late_alert: null}
+        - {checkin_event_id: d10, status: matched, cause: null, sub_cause: null, same_attribution: false, late_alert: false}

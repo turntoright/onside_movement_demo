@@ -29,6 +29,13 @@ models:
         data_tests:
           - accepted_values:
               arguments: {values: [manual, geofence_auto, end_of_day]}
+  - name: stg_evaluation_origins
+    columns:
+      - name: end_source
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments: {values: [checkout, checkin]}
   - name: stg_plant_movements
     columns:
       - name: event_id
