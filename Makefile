@@ -171,3 +171,12 @@ tf-check:
 	$(TF) fmt -check -recursive
 	$(TF) init -input=false -backend=false
 	$(TF) validate
+
+# ---- integration (spec §7.3) ----
+
+.PHONY: integration
+
+# The full chain on a fresh LocalStack. Run `make up` again before a demo backfill.
+integration: up
+	$(MAKE) deploy ENV=local
+	LOCALSTACK=1 $(VENV)/bin/pytest -q -m integration tests/integration
