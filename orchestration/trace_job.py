@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 
 from dagster import Config, Failure, OpExecutionContext, job, op
-from dagster_graphql import DagsterGraphQLClient, DagsterGraphQLClientError
+from dagster_graphql import DagsterGraphQLClient
 
 from generator.config import state_dir
 from generator.state import write_json
@@ -57,6 +57,9 @@ def trace_property(context: OpExecutionContext, config: TraceConfig, onside: Ons
     except TraceError as exc:
         write_json(result_path, {**record, "error": str(exc)})
         raise Failure(description=str(exc)) from None
+    except Exception as exc:  # e.g. a missing table or a locked warehouse: keep the contract total
+        write_json(result_path, {**record, "error": f"{type(exc).__name__}: {exc}"})
+        raise
     context.log.info("\n" + format_table(rows, config.property_id, config.max_hops))
     write_json(result_path, {**record, "reached": rows})
 
@@ -64,6 +67,11 @@ def trace_property(context: OpExecutionContext, config: TraceConfig, onside: Ons
 @job(name=TRACE_JOB, description="Trace one property's downstream reach (spec §5 Tracing).")
 def trace_job():
     trace_property()
+
+
+def short_reason(exc: BaseException) -> str:
+    """DagsterGraphQLClientError's text carries the whole query; prefer the underlying cause."""
+    return str(exc.__cause__ or exc).splitlines()[0]
 
 
 def dagster_running(host: str, port: int) -> bool:
@@ -101,24 +109,27 @@ def submit(
         return 2
     client = client_factory(host, port_number=port)
     config = {"property_id": property_id, "start_time": start, "max_hops": max_hops, "env": env}
-    run_id = "(not queued)"
     try:
         run_id = client.submit_job_execution(
             TRACE_JOB, run_config={"ops": {"trace_property": {"config": config}}}
         )
-        url = f"http://{host}:{port}/runs/{run_id}"
-        print(f"queued trace run {run_id} ({url})", flush=True)
-        deadline = clock() + timeout
+    except Exception as exc:  # the client wraps every transport error in DagsterGraphQLClientError
+        print(f"error: Dagster did not accept the trace run: {short_reason(exc)}", file=sys.stderr)
+        return 2
+    url = f"http://{host}:{port}/runs/{run_id}"
+    print(f"queued trace run {run_id} ({url})", flush=True)
+    deadline = clock() + timeout
+    try:
         while (status := client.get_run_status(run_id).value) not in TERMINAL:
             if clock() > deadline:
                 print(f"error: run {run_id} still {status} after {timeout:.0f}s", file=sys.stderr)
                 return 1
             sleep(poll)
-    except DagsterGraphQLClientError as exc:
-        print(f"error: Dagster rejected the trace run: {exc}", file=sys.stderr)
-        return 2
-    except Exception as exc:  # transport errors (requests/gql), e.g. Dagster stopped mid-wait
-        print(f"error: lost Dagster while waiting for run {run_id}: {exc}", file=sys.stderr)
+    except Exception as exc:  # e.g. Dagster stopped mid-wait
+        print(
+            f"error: lost Dagster while waiting for run {run_id}: {short_reason(exc)}",
+            file=sys.stderr,
+        )
         return 1
     # The op records under the env of the Dagster that ran it, which may not be the CLI's env.
     candidates = [
