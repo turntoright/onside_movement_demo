@@ -1,0 +1,12 @@
+rule_id,from_type,to_type,scope,nights
+R01,poultry,poultry,internal,1
+R02,poultry,poultry,any,3
+R03,pork,pork,internal,1
+R04,pork,pork,any,3
+R05,pork,poultry,any,2
+R06,poultry,pork,any,2
+R07,feed_mill,poultry,any,1
+R08,beef,dairy,any,1
+R09,dairy,dairy,external,2
+R10,kiwifruit,kiwifruit,external,1
+R11,vineyard,vineyard,external,1
