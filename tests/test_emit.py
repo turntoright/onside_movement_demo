@@ -59,10 +59,35 @@ def test_only_rejected_entries_are_resent():
     assert sleeps == [0.2, 0.4]
 
 
+def test_retry_of_a_rejected_entry_happens_before_the_next_batch():
+    client = FlakyEvents({"E04": 1})
+    emit(emissions(20), client, "bus", sleep=lambda s: None, log=lambda line: None)
+    assert client.calls == [
+        [f"E{i:02d}" for i in range(10)],
+        ["E04"],
+        [f"E{i:02d}" for i in range(10, 20)],
+    ]
+
+
+def test_progress_is_logged_every_n_events_and_once_at_the_end():
+    lines = []
+    emit(emissions(50), FlakyEvents(), "bus", log=lines.append, every=15)
+    assert [line.split()[1] for line in lines] == ["20/50", "40/50", "50/50"]
+
+
+def test_empty_emission_list_logs_once():
+    lines = []
+    assert emit([], FlakyEvents(), "bus", log=lines.append) == 0
+    assert lines[0].startswith("emitted 0/0 events")
+    assert len(lines) == 1
+
+
 def test_entries_rejected_on_every_attempt_raise():
     client = FlakyEvents({"E01": 99})
-    with pytest.raises(GeneratorError, match="ThrottlingException"):
+    with pytest.raises(GeneratorError, match="ThrottlingException") as excinfo:
         put_batch(client, [to_entry(e, "bus") for e in emissions(3)], sleep=lambda s: None)
+    assert "1 entries" in str(excinfo.value)
+    assert f"{MAX_ATTEMPTS} attempts" in str(excinfo.value)
     assert len(client.calls) == MAX_ATTEMPTS
 
 

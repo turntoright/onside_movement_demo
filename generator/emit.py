@@ -58,10 +58,18 @@ def emit(
     """Send every emission in order. Returns how many entries were sent."""
     entries = [to_entry(em, bus_name) for em in emissions]
     started = time.monotonic()
-    for start in range(0, len(entries), MAX_ENTRIES):
+    total = len(entries)
+    done = last_logged = 0
+
+    def report() -> None:
+        rate = done / max(time.monotonic() - started, 1e-6)
+        log(f"emitted {done}/{total} events ({rate:.0f} events/s)")
+
+    for start in range(0, total, MAX_ENTRIES):
         put_batch(events_client, entries[start : start + MAX_ENTRIES], sleep=sleep)
-        done = min(start + MAX_ENTRIES, len(entries))
-        if done % every < MAX_ENTRIES or done == len(entries):
-            rate = done / max(time.monotonic() - started, 1e-6)
-            log(f"emitted {done}/{len(entries)} events ({rate:.0f} events/s)")
+        done = min(start + MAX_ENTRIES, total)
+        if done - last_logged >= every and done < total:
+            report()
+            last_logged = done
+    report()
     return len(entries)
