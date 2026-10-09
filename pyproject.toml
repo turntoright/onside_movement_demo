@@ -17,15 +17,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest~=9.1", "ruff~=0.16"]
+dev = ["pytest~=9.1", "ruff~=0.16", "moto[s3,dynamodb,sqs,events]~=5.2"]
 
 [tool.setuptools.packages.find]
 where = [".", "lambdas"]
-include = ["generator*", "tracing*", "standdown_checker*"]
+include = ["generator*", "tracing*", "standdown_checker*", "archiver*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = [".", "lambdas"]
+markers = ["integration: needs a deployed LocalStack stack; runs only with LOCALSTACK=1"]
 
 [tool.ruff]
 line-length = 100

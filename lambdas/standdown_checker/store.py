@@ -32,7 +32,8 @@ class StateStore(Protocol):
       conditions fail, ``EvaluationExistsError`` wins.
     - ``commit`` is all-or-nothing: on any error neither the person nor the evaluation changes.
     - Reads are strongly consistent (a read after a successful commit sees it).
-    - Visits and evaluations returned are copies; mutating them never changes the store.
+    - Visits, evaluations and properties returned are copies; mutating them never changes
+      the store.
     """
 
     def load_person(self, person_id: str) -> tuple[int, list[dict]]: ...

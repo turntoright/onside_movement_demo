@@ -29,7 +29,7 @@ class InMemoryStore:
 
     def get_property(self, property_id: str) -> dict:
         try:
-            return self.properties[property_id]
+            return dict(self.properties[property_id])
         except KeyError:
             raise UnknownPropertyError(f"unknown property {property_id!r}") from None
 

@@ -92,3 +92,49 @@ def test_unknown_property_raises_validation_error(store_factory):
 
 def test_known_property_is_returned(store_factory):
     assert store_factory(PROPS).get_property("P1") == PROPS["P1"]
+
+
+VISIT_B = {"checkin_event_id": "B", "property_id": "P1"}
+
+
+def test_commits_chain_versions(store_factory):
+    store = store_factory(PROPS)
+    store.commit("U1", 0, [VISIT], None)
+    store.commit("U1", 1, [VISIT, VISIT_B], None)
+    store.commit("U1", 2, [VISIT_B], None)
+    assert store.load_person("U1") == (3, [VISIT_B])
+
+
+def test_stale_nonzero_version_conflicts(store_factory):
+    store = store_factory(PROPS)
+    store.commit("U1", 0, [VISIT], None)
+    store.commit("U1", 1, [VISIT, VISIT_B], None)
+    with pytest.raises(ConflictError):
+        store.commit("U1", 1, [], None)  # read at version 1, but the item is now at 2
+    assert store.load_person("U1") == (2, [VISIT, VISIT_B])
+
+
+def test_stale_nonzero_version_with_evaluation_leaves_everything_unchanged(store_factory):
+    store = store_factory(PROPS)
+    store.commit("U1", 0, [VISIT], None)
+    store.commit("U1", 1, [VISIT, VISIT_B], None)
+    with pytest.raises(ConflictError):
+        store.commit("U1", 1, [], {"checkin_event_id": "C"})
+    assert store.get_evaluation("C") is None
+    assert store.load_person("U1") == (2, [VISIT, VISIT_B])
+
+
+def test_both_conditions_failing_leaves_state_unchanged(store_factory):
+    store = store_factory(PROPS)
+    store.commit("U1", 0, [VISIT], {"checkin_event_id": "A", "breach": False})
+    store.commit("U1", 1, [VISIT, VISIT_B], None)
+    with pytest.raises(EvaluationExistsError):
+        store.commit("U1", 1, [], {"checkin_event_id": "A", "breach": True})
+    assert store.load_person("U1") == (2, [VISIT, VISIT_B])
+    assert store.get_evaluation("A") == {"checkin_event_id": "A", "breach": False}
+
+
+def test_returned_property_is_a_copy(store_factory):
+    store = store_factory(PROPS)
+    store.get_property("P1")["property_type"] = "changed"
+    assert store.get_property("P1") == {"property_type": "poultry", "owner_company_id": "C1"}
