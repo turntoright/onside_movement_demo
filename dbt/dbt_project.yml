@@ -45,3 +45,6 @@ seeds:
         expected_breach: boolean
         expected_rule_id: varchar
         expected_origin_visit_id: varchar
+
+flags:
+  send_anonymous_usage_stats: false
