@@ -15,3 +15,50 @@ models:
     columns:
       - name: movements
         data_tests: [not_null]
+
+unit_tests:
+  - name: reconciliation_classifies_every_case
+    model: fct_alert_reconciliation
+    given:
+      - input: ref('fct_high_risk_visits')
+        rows:
+          - {checkin_event_id: d1, origin_checkin_event_id: o1, rule_id: R02}
+          - {checkin_event_id: d2, origin_checkin_event_id: o2, rule_id: R02}
+          - {checkin_event_id: d3, origin_checkin_event_id: o3, rule_id: R05}
+          - {checkin_event_id: d4, origin_checkin_event_id: o4, rule_id: R02}
+          - {checkin_event_id: d5, origin_checkin_event_id: o5, rule_id: R02}
+          - {checkin_event_id: d6, origin_checkin_event_id: o6, rule_id: R02}
+      - input: ref('stg_evaluations')
+        rows:
+          - {checkin_event_id: d1, breach: true, rule_id: R02, origin_checkin_event_id: o1, version_read: 5, version_committed: 6}
+          - {checkin_event_id: d2, breach: false, version_read: 3, version_committed: 4}
+          - {checkin_event_id: o2, breach: false, version_read: 4, version_committed: 5}
+          - {checkin_event_id: d3, breach: false, version_read: 3, version_committed: 4}
+          - {checkin_event_id: o3, breach: false, version_read: 1, version_committed: 2}
+          - {checkin_event_id: d5, breach: false, version_read: 9, version_committed: 10}
+          - {checkin_event_id: o5, breach: false, version_read: 1, version_committed: 2}
+          - {checkin_event_id: d6, breach: false, version_read: 3, version_committed: 4}
+          - {checkin_event_id: o6, breach: false, version_read: 4, version_committed: 5}
+          - {checkin_event_id: d7, breach: true, rule_id: R02, origin_checkin_event_id: o7, version_read: 2, version_committed: 3}
+      - input: ref('stg_evaluation_origins')
+        rows:
+          - {target_checkin_event_id: d3, origin_checkin_event_id: o3, end_source: checkin}
+      - input: ref('stg_checkout_applied')
+        rows:
+          - {checkin_event_id: o3, checkout_event_id: o3-out, version_committed: 5}
+      - input: ref('stg_checkins')
+        rows:
+          - {event_id: d1, checkin_time: "2026-03-03 09:00:00+13", received_time: "2026-03-03 11:00:00+13"}
+          - {event_id: d2, checkin_time: "2026-03-03 09:00:00+13", received_time: "2026-03-03 09:00:10+13"}
+          - {event_id: o2, checkin_time: "2026-03-02 09:00:00+13", received_time: "2026-03-04 09:00:00+13"}
+          - {event_id: d6, checkin_time: "2026-03-03 09:00:00+13", received_time: "2026-03-03 09:00:30+13"}
+          - {event_id: o6, checkin_time: "2026-03-02 09:00:00+13", received_time: "2026-03-02 09:00:10+13"}
+    expect:
+      rows:
+        - {checkin_event_id: d1, status: matched, cause: null, sub_cause: null, same_attribution: true, late_alert: true}
+        - {checkin_event_id: d2, status: missed, cause: origin_not_seen, sub_cause: offline, same_attribution: null, late_alert: null}
+        - {checkin_event_id: d3, status: missed, cause: origin_end_not_seen, sub_cause: null, same_attribution: null, late_alert: null}
+        - {checkin_event_id: d4, status: missed, cause: not_evaluated, sub_cause: null, same_attribution: null, late_alert: null}
+        - {checkin_event_id: d5, status: missed, cause: unexplained, sub_cause: null, same_attribution: null, late_alert: null}
+        - {checkin_event_id: d6, status: missed, cause: origin_not_seen, sub_cause: reordered, same_attribution: null, late_alert: null}
+        - {checkin_event_id: d7, status: false_alert, cause: null, sub_cause: null, same_attribution: null, late_alert: null}
