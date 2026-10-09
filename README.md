@@ -82,7 +82,7 @@ Before the demo: the LocalStack quick start above, so the backfill has settled a
 run once. Keep `make dagster ENV=local` running in its own terminal. Stop Dagster with Ctrl-C,
 never by closing its terminal: a run killed mid-step keeps its `duckdb` pool slot. If runs then
 stall waiting for that slot: Runs → the old `STARTED` run → Terminate (force termination); its
-slot frees within a minute (or Deployment → Concurrency → `duckdb` → "Free all concurrency
+slot frees within 3 minutes (or Deployment → Concurrency → `duckdb` → "Free all concurrency
 slots for run").
 
 LocalStack keeps nothing across a Docker or laptop restart. On the day, check
@@ -154,7 +154,7 @@ Measured on a 4-CPU laptop with LocalStack, at the `local` scale (200 properties
 
 ## Testing
 
-- **Unit (`make test`):** 292 pytest tests pass (the integration test is skipped without
+- **Unit (`make test`):** 293 pytest tests pass (the integration test is skipped without
   LocalStack), with moto standing in for AWS. They cover the stand-down rules over the golden
   cases, the processor, both Lambdas, settle, the generator CLI, tracing, the Dagster sensor,
   checks, trace job and definitions, and the Makefile wiring. No Docker needed.

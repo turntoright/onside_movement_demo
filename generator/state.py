@@ -44,13 +44,18 @@ def reset_hint(env: str) -> str:
     if env == "local":
         return "run `make up` (LocalStack restarts empty), then deploy and setup again"
     if env == "aws":
-        # An expired session or a stray endpoint variable looks like a lost stack.
+        return "run `make destroy ENV=aws`, then deploy and setup again"
+    return f"run `make reset ENV={env}` and start again"
+
+
+def gone_hint(env: str) -> str:
+    """What to do when the stack looks gone or unreachable."""
+    if env == "aws":  # an expired session or a stray endpoint variable looks the same
         return (
             "check credentials, region and endpoint variables (docs/aws-deploy.md steps 1-2); "
-            "only if the stack is really gone: run `make destroy ENV=aws`, "
-            "then deploy and setup again"
+            "only if the stack is really gone: " + reset_hint(env)
         )
-    return f"run `make reset ENV={env}` and start again"
+    return reset_hint(env)
 
 
 def write_manifest(

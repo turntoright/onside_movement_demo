@@ -377,6 +377,21 @@ def test_unhandled_aws_errors_print_the_reset_hint_without_a_traceback(
     assert "Traceback" not in err
 
 
+def test_unhandled_aws_errors_on_aws_say_check_credentials_first(repo, monkeypatch, capsys):
+    (repo / "state" / "aws").mkdir()
+    shutil.copy(repo / "state" / "local" / "outputs.json", repo / "state" / "aws")
+
+    class Logs:
+        def filter_log_events(self, **kwargs):
+            raise EndpointConnectionError(endpoint_url="https://logs.example")
+
+    monkeypatch.setattr(A, "client", lambda env, service, region: Logs())
+    assert main(["alerts", "--env", "aws"]) == 2
+    err = capsys.readouterr().err
+    assert "; check credentials, region and endpoint variables" in err
+    assert "only if the stack is really gone: run `make destroy ENV=aws`" in err
+
+
 def test_aws_errors_while_settling_point_to_make_settle(aws, repo, capsys):
     run_id = "6f1c2a3e-0000-4000-8000-000000000001"
     started = "2026-10-10T01:00:00+00:00"

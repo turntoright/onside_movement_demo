@@ -354,5 +354,5 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except (BotoCoreError, ClientError) as exc:  # an AWS call outside the handled paths
-        print(f"error: {exc}; {S.reset_hint(args.env)}", file=sys.stderr)
+        print(f"error: {exc}; {S.gone_hint(args.env)}", file=sys.stderr)
         return 2

@@ -66,15 +66,19 @@ def test_manifest_records_its_start_and_can_be_read_back(tmp_path, monkeypatch):
         S.read_manifest("local", "run-2")
 
 
-def test_the_aws_hint_checks_the_setup_before_any_destroy():
+def test_the_aws_gone_hint_checks_the_setup_before_any_destroy():
     # An expired session or a stray endpoint variable looks like a lost stack (spec §3.2).
-    hint = S.reset_hint("aws")
+    hint = S.gone_hint("aws")
     assert hint.startswith(
         "check credentials, region and endpoint variables (docs/aws-deploy.md steps 1-2); "
     )
     assert hint.endswith(
         "only if the stack is really gone: run `make destroy ENV=aws`, then deploy and setup again"
     )
+    # Starting again (not an unreachable stack) keeps the plain reset hint.
+    assert S.reset_hint("aws") == "run `make destroy ENV=aws`, then deploy and setup again"
+    for env in ("local", "sim"):
+        assert S.gone_hint(env) == S.reset_hint(env)
     assert S.reset_hint("local").startswith("run `make up`")
 
 
@@ -123,6 +127,10 @@ def test_listing_with_localstack_down_says_make_up(aws):
     conn = A.Connection("local", _connection(aws).outputs, Down(), None, None, None)
     with pytest.raises(S.GeneratorError, match="make up"):
         conn.keys("control/")
+    # ENV=aws (what the sensor shows in its SkipReason): credentials first, destroy last.
+    remote = A.Connection("aws", _connection(aws).outputs, Down(), None, None, None)
+    with pytest.raises(S.GeneratorError, match="gone or unreachable; check credentials"):
+        remote.keys("control/")
 
 
 def test_objects_carry_last_modified_and_get_json_reads_back(aws):

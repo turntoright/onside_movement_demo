@@ -150,8 +150,8 @@ aws sts get-caller-identity --query Account --output text
 
 prints the same value as `$AWS_ACCOUNT_ID`. If the Dagster UI shows the `settled_runs` sensor
 skipping with "the stack is gone or unreachable", do NOT run `make destroy ENV=aws`: it usually
-means this terminal cannot see the stack, so check steps 1–2 first, as the hint says. Stop any `make dagster ENV=local`
-first (one Dagster at a time, on port 3000). Then:
+means this terminal cannot see the stack, so check steps 1–2 first, as the hint says. Stop any
+running `make dagster ENV=local` (one Dagster at a time, on port 3000). Then:
 
 ```bash
 make dagster ENV=aws        # http://127.0.0.1:3000; Ctrl-C stops it
@@ -159,7 +159,7 @@ make dagster ENV=aws        # http://127.0.0.1:3000; Ctrl-C stops it
 
 Stop Dagster with Ctrl-C, never by closing its terminal: a run killed mid-step keeps its
 `duckdb` pool slot. If runs then stall waiting for that slot: Runs → the old `STARTED` run →
-Terminate (force termination); its slot frees within a minute (or Deployment → Concurrency →
+Terminate (force termination); its slot frees within 3 minutes (or Deployment → Concurrency →
 `duckdb` → "Free all concurrency slots for run").
 
 Within a minute the `settled_runs` sensor starts one `dbt_build` run per settled run (the

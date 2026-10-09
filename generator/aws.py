@@ -12,7 +12,7 @@ from botocore.exceptions import ClientError
 from botocore.exceptions import ConnectionError as BotoConnectionError
 
 from .config import state_dir
-from .state import GeneratorError, reset_hint
+from .state import GeneratorError, gone_hint
 
 REGION = "ap-southeast-2"  # the default only; deployed stacks use outputs.region
 LOCALSTACK_ENDPOINT = "http://localhost:4566"
@@ -110,7 +110,7 @@ class Connection:
 
     def _gone(self) -> GeneratorError:
         return GeneratorError(
-            f"ENV={self.env}: the stack is gone or unreachable; {reset_hint(self.env)}"
+            f"ENV={self.env}: the stack is gone or unreachable; {gone_hint(self.env)}"
         )
 
     def remote_manifest_ids(self) -> set[str]:
