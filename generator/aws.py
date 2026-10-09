@@ -8,7 +8,8 @@ from dataclasses import dataclass, fields
 
 import boto3
 from botocore.config import Config
-from botocore.exceptions import ClientError, EndpointConnectionError
+from botocore.exceptions import ClientError
+from botocore.exceptions import ConnectionError as BotoConnectionError
 
 from .config import state_dir
 from .state import GeneratorError, reset_hint
@@ -86,7 +87,7 @@ class Connection:
             paginator = self.s3.get_paginator("list_objects_v2")
             pages = paginator.paginate(Bucket=self.outputs.bucket, Prefix=prefix)
             return [obj["Key"] for page in pages for obj in page.get("Contents", [])]
-        except EndpointConnectionError:
+        except BotoConnectionError:
             raise self._gone() from None
         except ClientError as exc:
             if exc.response.get("Error", {}).get("Code") == "NoSuchBucket":

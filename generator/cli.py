@@ -1,4 +1,4 @@
-"""Command line for the generator: setup, generate, reset (spec §3.2, §8)."""
+"""Command line for the generator: setup, generate, settle, poison, reset (spec §3.2, §8)."""
 
 from __future__ import annotations
 
@@ -11,8 +11,11 @@ from datetime import UTC, datetime
 
 from standdown_checker.rules import load_rules
 
+from . import aws as A
+from . import queues as Q
 from . import state as S
 from .config import (
+    DEFAULT_SCALE,
     ENVS,
     SCALES,
     compacted_dir,
@@ -23,18 +26,24 @@ from .config import (
     state_dir,
     warehouse_path,
 )
+from .emit import emit
 from .local_sim import InMemoryStore, run_sim
 from .reference import Reference, build_reference
+from .settle import TIMEOUT_SECONDS, Settler
 from .stream import (
     BACKFILL_LATENESS,
     LIVE_LATENESS,
+    Emission,
     build_emissions,
+    event_id,
     plan_backfill,
     plan_live,
     update_cursors,
 )
 
 RUN_NAMESPACE = uuid.UUID("0b6c3f0e-58f4-4d0c-9d8a-1d6f1f0a7c21")
+POISON_TIMEOUT_SECONDS = 300
+DYNAMODB_BATCH = 25
 
 
 def _now() -> datetime:
@@ -45,15 +54,46 @@ def _ts(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
 
+def _load_properties(conn: A.Connection, ref: Reference) -> None:
+    """Batch-write the snapshot to DynamoDB `properties`, resending unprocessed items."""
+    requests = [
+        {
+            "PutRequest": {
+                "Item": {
+                    "property_id": {"S": p.property_id},
+                    "property_type": {"S": p.property_type},
+                    "owner_company_id": {"S": p.owner_company_id},
+                }
+            }
+        }
+        for p in ref.properties
+    ]
+    table = conn.outputs.property_table
+    for start in range(0, len(requests), DYNAMODB_BATCH):
+        pending = {table: requests[start : start + DYNAMODB_BATCH]}
+        for _ in range(10):
+            pending = conn.dynamodb.batch_write_item(RequestItems=pending).get("UnprocessedItems")
+            if not pending:
+                break
+        else:
+            raise S.GeneratorError("DynamoDB kept returning unprocessed property items")
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
-    if (ref_dir(args.env) / "properties.json").exists():
+    scale_name = args.scale or DEFAULT_SCALE[args.env]
+    conn = A.connect(args.env) if args.env != "sim" else None
+    if (ref_dir(args.env) / "properties.json").exists() or (conn and conn.keys("ref/")):
         raise S.GeneratorError(
-            f"reference data already exists for ENV={args.env}; "
-            f"run `make reset ENV={args.env}` first"
+            f"reference data already exists for ENV={args.env}; {S.reset_hint(args.env)}"
         )
-    ref = build_reference(SCALES[args.scale], random.Random(args.seed))
+    ref = build_reference(SCALES[scale_name], random.Random(args.seed))
     ref.write(ref_dir(args.env))
-    S.write_setup(args.env, args.seed, args.scale)
+    if conn is not None:  # the same snapshot goes to S3 ref/ and DynamoDB (spec §3.6)
+        for name in ("properties", "people", "companies"):
+            body = (ref_dir(args.env) / f"{name}.json").read_bytes()
+            conn.s3.put_object(Bucket=conn.outputs.bucket, Key=f"ref/{name}.json", Body=body)
+        _load_properties(conn, ref)
+    S.write_setup(args.env, args.seed, scale_name)
     print(f"setup ENV={args.env}: {len(ref.properties)} properties, {len(ref.people)} people")
     return 0
 
@@ -62,6 +102,10 @@ def cmd_generate(args: argparse.Namespace) -> int:
     setup = S.read_setup(args.env)
     state = S.load_state(args.env)
     S.check_consistency(args.env, state)
+    conn = None
+    if args.env != "sim":
+        conn = A.connect(args.env)
+        S.check_remote_consistency(args.env, state, conn.remote_manifest_ids())
     ref = Reference.read(ref_dir(args.env))
     scale = SCALES[setup["scale"]]
     seed = setup["seed"]
@@ -70,7 +114,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
         if state is not None:
             raise S.GeneratorError(
                 f"ENV={args.env} already has generator state; a backfill runs once. "
-                f"Run `make reset ENV={args.env}` to start again."
+                f"To start again, {S.reset_hint(args.env)}."
             )
         anchor = _ts(args.anchor) or _now()
         run_id = str(uuid.uuid5(RUN_NAMESPACE, f"{seed}:backfill:{anchor.isoformat()}"))
@@ -100,25 +144,94 @@ def cmd_generate(args: argparse.Namespace) -> int:
         plants, run_end, lateness = [], now, LIVE_LATENESS
 
     emissions, counts = build_emissions(visits, plants, ref, run_id, rng, run_end, lateness)
-    S.write_manifest(args.env, run_id, args.mode, seed, counts)  # before "emitting" (§3.2)
-    properties = {
-        p.property_id: {"property_type": p.property_type, "owner_company_id": p.owner_company_id}
-        for p in ref.properties
-    }
-    store = InMemoryStore.load(sim_store_path(), properties)
-    derived = run_sim(emissions, store, load_rules(rules_path()), compacted_dir(args.env) / run_id)
-    store.save(sim_store_path())
+    if conn is None:
+        S.write_manifest(args.env, run_id, args.mode, seed, counts)  # before "emitting" (§3.2)
+        properties = {
+            p.property_id: {
+                "property_type": p.property_type,
+                "owner_company_id": p.owner_company_id,
+            }
+            for p in ref.properties
+        }
+        store = InMemoryStore.load(sim_store_path(), properties)
+        out_dir = compacted_dir(args.env) / run_id
+        result = run_sim(emissions, store, load_rules(rules_path()), out_dir)
+        store.save(sim_store_path())
+    else:
+        manifest = S.write_manifest(
+            args.env, run_id, args.mode, seed, counts, started_at=_now().isoformat()
+        )
+        conn.put_json(f"control/manifests/{run_id}.json", manifest)  # before emitting (§3.2)
+        result = {"sent": _emit(args.env, emissions, conn)}
     update_cursors(state["cursors"], visits)
     state["runs"].append(run_id)
     S.save_state(args.env, state)
     anchor_note = f" anchor={state['anchor']}" if args.mode == "backfill" else ""
-    print(f"{args.mode} run {run_id}{anchor_note}: {counts} -> {derived}")
+    print(f"{args.mode} run {run_id}{anchor_note}: {counts} -> {result}")
     if shortfall:
         print(f"note: {shortfall} requested check-ins did not fit (no one had room)")
+    if conn is not None and not args.no_settle:
+        settle_run(conn, S.read_manifest(args.env, run_id), args.timeout)
+    return 0
+
+
+def _emit(env: str, emissions: list[Emission], conn: A.Connection) -> int:
+    """Emit after the control record is written; a failure leaves state that needs a reset."""
+    try:
+        return emit(emissions, conn.events, conn.outputs.bus_name)
+    except S.GeneratorError as exc:
+        raise S.GeneratorError(f"{exc}; {S.reset_hint(env)}") from None
+
+
+def settle_run(conn: A.Connection, manifest: dict, timeout: float) -> dict:
+    started = datetime.now(UTC)
+    settled = Settler(manifest, conn, timeout_seconds=timeout).run()
+    seconds = (datetime.now(UTC) - started).total_seconds()
+    print(
+        f"settled run {manifest['run_id']} in {seconds:.0f}s: {settled['envelopes']} envelopes, "
+        f"{settled['breaches']} breaches -> {', '.join(settled['parts'])}"
+    )
+    return settled
+
+
+def cmd_settle(args: argparse.Namespace) -> int:
+    if args.env == "sim":
+        raise S.GeneratorError("ENV=sim needs no settling; its runs are written complete")
+    manifest = S.read_manifest(args.env, args.run)
+    settle_run(A.connect(args.env), manifest, args.timeout)
+    return 0
+
+
+def cmd_poison(args: argparse.Namespace) -> int:
+    if args.env == "sim":
+        raise S.GeneratorError("poison needs ENV=local or ENV=aws (it demonstrates the DLQ)")
+    conn = A.connect(args.env)
+    run_id = str(uuid.uuid4())
+    sent_at = _now()
+    record = {"run_id": run_id, "k": args.k, "sent_at": sent_at.isoformat()}
+    S.write_json(state_dir(args.env) / "poison" / f"{run_id}.json", record)
+    conn.put_json(f"control/poison/{run_id}.json", record)  # never control/manifests/
+    poison = [
+        Emission(sent_at, "CheckIn", {"poison": True, "event_id": event_id(run_id, seq)})
+        for seq in range(args.k)
+    ]
+    _emit(args.env, poison, conn)
+    expected = S.poison_injected(args.env)
+    Q.wait_for_dlq(conn.sqs, conn.outputs.visit_dlq_url, expected, timeout=args.timeout)
     return 0
 
 
 def cmd_reset(args: argparse.Namespace) -> int:
+    if args.env == "local":
+        raise S.GeneratorError(
+            "reset does not apply to ENV=local; use `make up` "
+            "(it recreates LocalStack and resets state/local)"
+        )
+    if args.env == "aws":
+        raise S.GeneratorError(
+            "reset does not apply to ENV=aws (the AWS resources would remain); "
+            "use `make destroy ENV=aws`"
+        )
     shutil.rmtree(state_dir(args.env), ignore_errors=True)
     shutil.rmtree(data_dir(args.env), ignore_errors=True)
     warehouse_path(args.env).unlink(missing_ok=True)
@@ -126,7 +239,13 @@ def cmd_reset(args: argparse.Namespace) -> int:
     return 0
 
 
-COMMANDS = {"setup": cmd_setup, "generate": cmd_generate, "reset": cmd_reset}
+COMMANDS = {
+    "setup": cmd_setup,
+    "generate": cmd_generate,
+    "settle": cmd_settle,
+    "poison": cmd_poison,
+    "reset": cmd_reset,
+}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -134,7 +253,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     p_setup = sub.add_parser("setup")
     p_setup.add_argument("--env", choices=ENVS, required=True)
-    p_setup.add_argument("--scale", choices=sorted(SCALES), default="ci")
+    p_setup.add_argument("--scale", choices=sorted(SCALES), help="default: per environment")
     p_setup.add_argument("--seed", type=int, default=42)
     p_gen = sub.add_parser("generate")
     p_gen.add_argument("--env", choices=ENVS, required=True)
@@ -142,6 +261,16 @@ def main(argv: list[str] | None = None) -> int:
     p_gen.add_argument("--n", type=int, default=50)
     p_gen.add_argument("--anchor", help="backfill end time (ISO 8601); default now")
     p_gen.add_argument("--now", help="live run time (ISO 8601); default now")
+    p_gen.add_argument("--no-settle", action="store_true", help="local/aws: emit only")
+    p_gen.add_argument("--timeout", type=float, default=TIMEOUT_SECONDS)
+    p_settle = sub.add_parser("settle")
+    p_settle.add_argument("--env", choices=ENVS, required=True)
+    p_settle.add_argument("--run", required=True)
+    p_settle.add_argument("--timeout", type=float, default=TIMEOUT_SECONDS)
+    p_poison = sub.add_parser("poison")
+    p_poison.add_argument("--env", choices=ENVS, required=True)
+    p_poison.add_argument("--k", type=int, default=3)
+    p_poison.add_argument("--timeout", type=float, default=POISON_TIMEOUT_SECONDS)
     p_reset = sub.add_parser("reset")
     p_reset.add_argument("--env", choices=ENVS, required=True)
     args = parser.parse_args(argv)

@@ -5,17 +5,25 @@ PY := $(VENV)/bin/python
 DBT := $(VENV)/bin/dbt
 export REPO_ROOT
 
+# Only a command-line ENV overrides this (a shell variable named ENV never does).
 ENV = sim
-SCALE ?= ci
-MODE ?= backfill
-N ?= 50
+# Empty SCALE means the per-environment default (sim: ci, local: local, aws: aws).
+SCALE =
+MODE = backfill
+N = 50
+K = 3
+RUN =
+# Optional settle/poison timeout in seconds; passed only when set.
+TIMEOUT =
 # Optional pins for reproducible sim data (ISO 8601); passed only when set.
 ANCHOR ?=
 NOW ?=
 # standdown_checker lives under lambdas/; the editable install does not map it.
-GEN_PY := PYTHONPATH=$(REPO_ROOT)/lambdas $(PY)
+# Unbuffered, so emit and settle progress shows up while a long run is going.
+GEN_PY := PYTHONUNBUFFERED=1 PYTHONPATH=$(REPO_ROOT)/lambdas $(PY)
 
-.PHONY: venv fmt lint unit test setup generate reset dbt-build sim-data sim-e2e trace
+.PHONY: venv fmt lint unit test setup generate settle poison reset dbt-build sim-data \
+	sim-e2e trace
 
 venv:
 	python3 -m venv $(VENV)
@@ -35,12 +43,22 @@ unit:
 
 test: lint unit
 
+# ---- data (ENV=sim|local|aws) ----
+
 setup:
-	$(GEN_PY) -m generator setup --env $(ENV) --scale $(SCALE)
+	$(GEN_PY) -m generator setup --env $(ENV) $(if $(SCALE),--scale $(SCALE))
 
 generate:
 	$(GEN_PY) -m generator generate --env $(ENV) --mode $(MODE) --n $(N) \
-		$(if $(ANCHOR),--anchor $(ANCHOR)) $(if $(NOW),--now $(NOW))
+		$(if $(ANCHOR),--anchor $(ANCHOR)) $(if $(NOW),--now $(NOW)) \
+		$(if $(TIMEOUT),--timeout $(TIMEOUT))
+
+settle:
+	$(if $(RUN),,$(error settle needs RUN=<run_id>, see state/$(ENV)/manifests/))
+	$(GEN_PY) -m generator settle --env $(ENV) --run $(RUN) $(if $(TIMEOUT),--timeout $(TIMEOUT))
+
+poison:
+	$(GEN_PY) -m generator poison --env $(ENV) --k $(K) $(if $(TIMEOUT),--timeout $(TIMEOUT))
 
 reset:
 	$(GEN_PY) -m generator reset --env $(ENV)
