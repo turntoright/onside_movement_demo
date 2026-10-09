@@ -78,7 +78,11 @@ and tears it all down. Nothing in this repo touches AWS unless `ENV=aws` is give
 ## Demo script (about 5 minutes)
 
 Before the demo: the LocalStack quick start above, so the backfill has settled and Dagster has
-run once. Keep `make dagster ENV=local` running in its own terminal.
+run once. Keep `make dagster ENV=local` running in its own terminal. Stop Dagster with Ctrl-C,
+never by closing its terminal: a run killed mid-step keeps its `duckdb` pool slot. If runs then
+stall waiting for that slot: Runs → the old `STARTED` run → Terminate (force termination); its
+slot frees within a minute (or Deployment → Concurrency → `duckdb` → "Free all concurrency
+slots for run").
 
 1. **The story (30 s).** This README's table and diagram.
 2. **Live events (1 min).**

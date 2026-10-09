@@ -15,3 +15,11 @@ def test_the_instance_queues_runs_and_the_duckdb_pool_admits_one_op(tmp_path):
         assert (pools.default_pool_limit, pools.pool_granularity.value) == (1, "op")
         assert instance.event_log_storage.get_concurrency_info("duckdb").limit == 1
         assert not instance.telemetry_enabled
+
+
+def test_the_monitoring_daemon_frees_the_slot_of_a_run_that_died_holding_it(tmp_path):
+    shutil.copy(YAML, tmp_path / "dagster.yaml")
+    with DagsterInstance.from_config(str(tmp_path)) as instance:
+        settings = instance.run_monitoring_settings
+        assert settings["enabled"] is True
+        assert settings["free_slots_after_run_end_seconds"] == 60
