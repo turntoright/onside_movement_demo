@@ -23,6 +23,12 @@ models:
     columns:
       - name: movements
         data_tests: [not_null]
+  - name: dim_property_network
+    columns:
+      - name: property_id
+        data_tests: [unique, not_null]
+      - name: pagerank_rank
+        data_tests: [unique, not_null]
 
 unit_tests:
   - name: reconciliation_classifies_every_case
