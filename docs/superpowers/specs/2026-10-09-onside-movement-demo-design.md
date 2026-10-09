@@ -1,6 +1,6 @@
 # Onside movement demo — design
 
-Date: 2026-10-09. Revision 5: blocking issues from reviews 1–4 fixed (see §12).
+Date: 2026-10-09. Revision 6: blocking issues from reviews 1–5 fixed (see §12).
 
 ## 1. Purpose
 
@@ -109,6 +109,8 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
   - Loads the generator state and **continues each person's timeline**.
   - Emits N check-ins (plus their check-outs) with `event_time` in the last 30 minutes.
     Some events are received up to 10 minutes late.
+  - It skips people whose last visit is still open, i.e. whose check-out would fall
+    after the previous run's end, so "no overlap" holds.
   - About 20% of the live check-ins are deliberate stand-down breaches, so alerts
     appear in the demo.
   - It updates the generator state.
@@ -121,11 +123,15 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
       LocalStack and AWS never mix.
   - **`sim`:** makes no AWS calls (§3.3 Local output). Used by CI and for dbt
     development.
-  - `make up` resets `state/local/`, because a LocalStack restart wipes its DynamoDB and
-    S3.
+  - `make up` resets `state/local/` and LocalStack's Terraform state, because a
+    LocalStack restart wipes its DynamoDB and S3.
+  - `make reset ENV=sim` clears `state/sim/` and `data/sim/` together.
+  - A backfill refuses to run when the environment already has generator state.
+  - `state/` and `data/` are gitignored.
 - **Manifests:**
-  - Each run writes `control/manifests/<run_id>.json` (mode, seed, distinct event_id
-    counts per type) **before** emitting.
+  - Each backfill or live run writes `control/manifests/<run_id>.json` (mode, seed,
+    distinct event_id counts per type) **before** emitting.
+  - Poison runs never write here; they write only `control/poison/` (§3.3).
   - The checks sum the environment's manifests.
 - **Scale per environment:**
   - LocalStack: the default backfill.
@@ -170,9 +176,15 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
     for its generator events, plus the evaluation, applied and alert envelopes from
     `local_sim`. They go to `data/sim/compacted/<run_id>/*.ndjson`, the same layout as
     S3 `compacted/<env>/<run_id>/`.
-  - The dbt target `sim` globs `data/sim/compacted/*/*.ndjson`; targets `local` and
-    `aws` glob `s3://<bucket>/compacted/<env>/*/*.ndjson`. The SQL is otherwise the
-    same.
+  - `setup ENV=sim` writes the reference snapshot to
+    `data/sim/ref/{properties,people,companies}.json`. `local_sim` and live runs load
+    it from there.
+  - Each dbt target sets two variables, and the SQL is otherwise the same:
+
+    | Target | `compacted_glob` | `ref_root` |
+    |---|---|---|
+    | `sim` | `data/sim/compacted/*/*.ndjson` | `data/sim/ref/` |
+    | `local`, `aws` | `s3://<bucket>/compacted/<env>/*/*.ndjson` | `s3://<bucket>/ref/` |
 
 ### 3.4 Settle and compact
 LocalStack's Firehose may write one small S3 object per event, and the backfill could
@@ -187,7 +199,11 @@ produce hundreds of thousands of them. So nothing downstream reads `raw/` direct
    - Parse each new object (concatenated JSON envelopes).
    - Append its envelopes to a spool file `state/<env>/spool/<run_id>.ndjson`, so
      nothing is held in memory.
-   - Count distinct event_ids per type.
+   - Count only **this run's** event_ids per type. The generator holds them in memory;
+     `make settle` rebuilds them from the seed and `run_id`.
+   - Leftovers from earlier runs can then never satisfy the gate early.
+   - Append to the spool **before** updating the key cache, so a crash causes
+     duplicates, never loss.
 3. **Settled** when all of these hold:
    - every manifest event is present;
    - there is one CheckInEvaluated per distinct check-in and one CheckOutApplied per
@@ -286,8 +302,10 @@ filter, each with the end and nights the Lambda used.
 ## 5. dbt models
 
 ### Staging
-- `stg_checkins`, `stg_checkouts`, `stg_plant_movements`, `stg_evaluations`,
+- Events: `stg_checkins`, `stg_checkouts`, `stg_plant_movements`, `stg_evaluations`,
   `stg_checkout_applied`, `stg_realtime_alerts`.
+- Reference data, read from `var('ref_root')`: `stg_properties`, `stg_people`,
+  `stg_companies`.
 - **Reading:**
   - Read the target's glob (§3.3 Local output). Use `read_json(glob, format='newline_delimited', columns={...})`, declaring
     `detail` as JSON (no schema inference).
@@ -362,7 +380,11 @@ incremental by received_time, a lookback window, and recomputing the affected pe
 
 **Queue.**
 - SQS standard queue with `ReportBatchItemFailures`.
-- Visibility timeout 30 s; DLQ after 5 receives, with 14-day retention.
+- Visibility timeout 30 s; Lambda timeout 25 s (it must not exceed the visibility
+  timeout).
+- DLQ after 5 receives, with 14-day retention.
+- A poison message reaches the DLQ after about 2.5 minutes. `make poison` waits for
+  the DLQ count to reach the expected value before returning.
 - Delivery order is **not** assumed, so the processor is order-independent.
 
 **State.**
@@ -478,6 +500,10 @@ matter.
   level; the missed rate above a threshold at warn level.
 
 ### 6.4 Dagster
+- **Environment:**
+  - Dagster runs only for `local` and `aws`. `sim` uses plain `dbt build`.
+  - `make dagster ENV=…` sets the dbt target, the bucket and the DuckDB file
+    `warehouse/<env>.duckdb` (one per environment).
 - **Sensor:** fires on new `control/settled/` objects, never on raw objects. A
   schedule exists as a backup.
 - **Concurrency:** dbt runs and the trace job share a concurrency pool of size 1, to
@@ -516,8 +542,9 @@ matter.
      - `FailedEntryCount` treated as a failure.
 2. **dbt:** the tests in §6.3. CI generates `ENV=sim` data (a backfill and one live
    run), including the simulator's evaluations, so reconciliation runs in CI too.
-3. **Integration:** the full chain on a **fresh** LocalStack stack, before the demo
-   backfill, so its orphan, duplicate and poison cases never mix with demo data. Send a small fixed set including
+3. **Integration:** the full chain on a **fresh** LocalStack stack. The order is
+   `make up` → `make integration` → `make up` (reset) → deploy → setup → backfill.
+   Its orphan, duplicate and poison cases then never mix with demo data. Send a small fixed set including
    out-of-order, duplicate, orphan check-out and poison cases. Wait for settling. Then
    assert person_state, evaluations, the S3 objects and the DLQ count.
 4. **Parity:** over the full generated dataset, on both `sim` and LocalStack:
@@ -530,9 +557,16 @@ matter.
     `ENV=sim` dataset.
   - A separate LocalStack integration job, with a token from repository secrets if
     needed.
-- **Makefile:** `up`, `deploy ENV=local|aws`, `setup`,
-  `generate MODE=backfill|live N=…`, `poison K=…`, `dagster`,
-  `trace PROPERTY=… START=…`, `destroy ENV=…`, `test`.
+- **Makefile:**
+  - Infrastructure: `up`, `deploy ENV=local|aws`, `destroy ENV=local|aws`.
+  - Data: `setup ENV=…`, `generate ENV=… MODE=backfill|live N=…`,
+    `settle ENV=… RUN=…`, `poison ENV=local|aws K=…`, `reset ENV=sim`.
+  - Run: `dagster ENV=local|aws`, `trace ENV=… PROPERTY=… START=…`.
+  - Tests: `test` (unit plus dbt on sim), `integration` (fresh LocalStack).
+- **Terraform state:**
+  - Kept separately per environment: `infra/terraform/state/<env>.tfstate`, passed
+    via `-state`. A backend config per environment works too.
+  - The AWS bucket name includes the account id, so it is globally unique.
 - **Real AWS:**
   - Region ap-southeast-2, local Terraform state.
   - A $5 budget alarm is created first; `make destroy` runs after the screenshots,
@@ -674,3 +708,20 @@ runs. Fix: `ENV=sim` as a full third environment with a persisted sim store
 - golden-case ids;
 - a one-hour skew margin on listing;
 - reproducibility relative to the anchor time.
+
+**Review 5: 2 blocking issues, fixed in revision 6.**
+
+| # | Issue | Fix |
+|---|---|---|
+| 1 | `sim` had no location for reference data | `data/sim/ref/`, a per-target `ref_root`, `stg_properties`/`stg_people`/`stg_companies` |
+| 2 | Poison runs were counted in the completeness manifests | Poison writes only `control/poison/` |
+
+Non-blocking items also adopted:
+- the integration and reset order;
+- `reset ENV=sim`, refusing a second backfill, gitignore;
+- settle counts only this run's ids, spool before cache;
+- poison timing, Lambda timeout ≤ visibility;
+- full Makefile list;
+- Terraform state per environment, unique bucket;
+- Dagster environment and DuckDB file per environment;
+- live runs skip open visits.
