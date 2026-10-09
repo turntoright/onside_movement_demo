@@ -215,19 +215,18 @@ def cmd_settle(args: argparse.Namespace) -> int:
     return 0
 
 
-CHECKER_LOG_GROUP = "/aws/lambda/onside-standdown-checker"
-
-
 def cmd_alerts(args: argparse.Namespace) -> int:
     """Count the stand-down alerts in the checker Lambda's logs (spec §9 step 2)."""
     if args.env == "sim":
         raise S.GeneratorError("alerts needs ENV=local or ENV=aws (it reads Lambda logs)")
-    logs = A.client(args.env, "logs")
+    outputs = A.load_outputs(args.env)
+    logs = A.client(args.env, "logs", outputs.region)
+    log_group = f"/aws/lambda/{outputs.standdown_function}"  # Terraform creates it beforehand
     lines = 0
     distinct: set[str] = set()
     token = None
     while True:
-        kwargs = {"logGroupName": CHECKER_LOG_GROUP, "filterPattern": '{ $.level = "alert" }'}
+        kwargs = {"logGroupName": log_group, "filterPattern": '{ $.level = "alert" }'}
         if token:
             kwargs["nextToken"] = token
         page = logs.filter_log_events(**kwargs)

@@ -26,6 +26,8 @@ def test_local_clients_go_to_localstack_with_test_credentials(monkeypatch):
 
 def test_aws_clients_use_the_default_credential_chain():
     assert A.client_kwargs("aws") == {"region_name": "ap-southeast-2"}
+    assert A.client_kwargs("aws", "us-west-2") == {"region_name": "us-west-2"}
+    assert A.client_kwargs("local", "us-west-2")["region_name"] == "us-west-2"
 
 
 def test_local_clients_fail_fast_and_aws_clients_keep_retrying():

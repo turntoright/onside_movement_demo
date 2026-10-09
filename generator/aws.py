@@ -14,20 +14,20 @@ from botocore.exceptions import ConnectionError as BotoConnectionError
 from .config import state_dir
 from .state import GeneratorError, reset_hint
 
-REGION = "ap-southeast-2"
+REGION = "ap-southeast-2"  # the default only; deployed stacks use outputs.region
 LOCALSTACK_ENDPOINT = "http://localhost:4566"
 
 
-def client_kwargs(env: str) -> dict:
+def client_kwargs(env: str, region: str = REGION) -> dict:
     if env == "local":
         return {
-            "region_name": REGION,
+            "region_name": region,
             "endpoint_url": os.environ.get("LOCALSTACK_ENDPOINT", LOCALSTACK_ENDPOINT),
             "aws_access_key_id": "test",
             "aws_secret_access_key": "test",
         }
     if env == "aws":
-        return {"region_name": REGION}  # default credential chain
+        return {"region_name": region}  # default credential chain
     raise GeneratorError(f"ENV={env} makes no AWS calls; use ENV=local or ENV=aws")
 
 
@@ -41,8 +41,8 @@ def client_config(env: str) -> Config:
     return Config(retries={"max_attempts": 10, "mode": "standard"})
 
 
-def client(env: str, service: str):
-    return boto3.client(service, config=client_config(env), **client_kwargs(env))
+def client(env: str, service: str, region: str = REGION):
+    return boto3.client(service, config=client_config(env), **client_kwargs(env, region))
 
 
 @dataclass(frozen=True)
@@ -111,12 +111,12 @@ class Connection:
 
 
 def connect(env: str) -> Connection:
-    outputs = load_outputs(env)
+    outputs = load_outputs(env)  # the region Terraform deployed to, not a second copy of it
     return Connection(
         env,
         outputs,
-        client(env, "s3"),
-        client(env, "dynamodb"),
-        client(env, "events"),
-        client(env, "sqs"),
+        client(env, "s3", outputs.region),
+        client(env, "dynamodb", outputs.region),
+        client(env, "events", outputs.region),
+        client(env, "sqs", outputs.region),
     )

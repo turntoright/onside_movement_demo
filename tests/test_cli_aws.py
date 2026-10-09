@@ -9,7 +9,6 @@ from botocore.exceptions import ClientError, EndpointConnectionError
 from generator import aws as A
 from generator import cli
 from generator.cli import main
-from tests.aws_fixtures import REGION
 
 ROOT = Path(__file__).resolve().parents[1]
 ANCHOR = "2026-10-01T00:00:00+00:00"
@@ -20,7 +19,9 @@ def repo(aws, tmp_path, monkeypatch):
     """A deployed `local` environment backed by moto; nothing reaches LocalStack or AWS."""
     shutil.copytree(ROOT / "shared", tmp_path / "shared")
     monkeypatch.setenv("REPO_ROOT", str(tmp_path))
-    monkeypatch.setattr(A, "client", lambda env, service: boto3.client(service, region_name=REGION))
+    monkeypatch.setattr(
+        A, "client", lambda env, service, region: boto3.client(service, region_name=region)
+    )
     (tmp_path / "state" / "local").mkdir(parents=True)
     (tmp_path / "state" / "local" / "outputs.json").write_text(json.dumps(aws.outputs()))
     return tmp_path
@@ -249,7 +250,7 @@ def test_failed_poison_emit_points_to_the_recovery(aws, repo, monkeypatch, capsy
     assert "make up" in err
 
 
-def test_alerts_counts_json_alert_lines_across_pages(monkeypatch, capsys):
+def test_alerts_counts_json_alert_lines_across_pages(repo, monkeypatch, capsys):
     def alert(checkin_id):
         return json.dumps({"level": "alert", "checkin_event_id": checkin_id})
 
@@ -281,10 +282,37 @@ def test_alerts_counts_json_alert_lines_across_pages(monkeypatch, capsys):
             return pages[len(self.calls) - 1]
 
     logs = Logs()
-    monkeypatch.setattr(A, "client", lambda env, service: logs)
+    monkeypatch.setattr(A, "client", lambda env, service, region: logs)
     assert main(["alerts", "--env", "local"]) == 0
     assert "3 alert log lines, 2 distinct alerts" in capsys.readouterr().out
     assert logs.calls[1]["nextToken"] == "t1"
+    assert logs.calls[0]["logGroupName"] == "/aws/lambda/onside-standdown-checker"
+
+
+def test_alerts_and_clients_follow_the_terraform_outputs(repo, monkeypatch, capsys):
+    """Renamed function, other region: nothing hard-coded drifts from the deployed stack."""
+    path = repo / "state" / "local" / "outputs.json"
+    outputs = json.loads(path.read_text())
+    outputs["standdown_function"]["value"] = "plan3-standdown-checker"
+    outputs["region"]["value"] = "us-west-2"
+    path.write_text(json.dumps(outputs))
+    built, groups = [], []
+
+    class Logs:
+        def filter_log_events(self, **kwargs):
+            groups.append(kwargs["logGroupName"])
+            return {"events": []}
+
+    def fake_client(env, service, region):
+        built.append((service, region))
+        return Logs()
+
+    monkeypatch.setattr(A, "client", fake_client)
+    assert main(["alerts", "--env", "local"]) == 0
+    assert groups == ["/aws/lambda/plan3-standdown-checker"]
+    A.connect("local")
+    assert {region for _, region in built} == {"us-west-2"}
+    assert sorted(service for service, _ in built) == ["dynamodb", "events", "logs", "s3", "sqs"]
 
 
 def test_alerts_refuses_sim(capsys):
@@ -308,7 +336,7 @@ def test_unhandled_aws_errors_print_the_reset_hint_without_a_traceback(
         def filter_log_events(self, **kwargs):
             raise error
 
-    monkeypatch.setattr(A, "client", lambda env, service: Logs())
+    monkeypatch.setattr(A, "client", lambda env, service, region: Logs())
     assert main(["alerts", "--env", "local"]) == 2
     err = capsys.readouterr().err
     assert err.startswith("error: ")
