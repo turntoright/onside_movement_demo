@@ -126,7 +126,8 @@ def _dependencies() -> dict:
             "events_client": boto3.client("events"),
             "bus_name": os.environ["EVENT_BUS_NAME"],
         }
-        # Once per container: () proves zoneinfo reads only the bundled tzdata (spec §2).
+        # Once per container: [] (an empty TZPATH) proves zoneinfo reads only the bundled
+        # tzdata (spec §2).
         _log(level="info", event="cold_start", tzpath=list(zoneinfo.TZPATH))
     return _DEPENDENCIES
 

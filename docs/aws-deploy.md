@@ -2,7 +2,7 @@
 
 This is the one real-AWS run that spec §1 asks for: the same Terraform as LocalStack, a small
 dataset, screenshots, then teardown. Every step is a command in this repo. Run them in order,
-from the repo root, in one shell. Expected cost: well under US$1 (step 9); the budget alarm
+from the repo root, in one shell (step 7 adds a second). Expected cost: well under US$1 (step 9); the budget alarm
 from step 3 emails at US$4 actual and at a US$5 forecast.
 
 Nothing in this repo runs against AWS by itself: `ENV=aws` is never a default, `make deploy`
@@ -24,14 +24,12 @@ other than `AWS_ACCOUNT_ID`.
 ```bash
 export AWS_PROFILE=<your profile>          # or other credentials for the demo account
 export AWS_DEFAULT_REGION=ap-southeast-2    # for the aws CLI; Terraform has its own default
+export AWS_REGION=ap-southeast-2            # AWS CLI v2 lets this override AWS_DEFAULT_REGION
 aws sts get-caller-identity                 # note the 12-digit Account
 export AWS_ACCOUNT_ID=<the 12 digits>
-aws lambda get-account-settings --query 'AccountLimit.ConcurrentExecutions'
 ```
 
-`ConcurrentExecutions` must be at least 10: the two event source mappings run up to 5 + 2
-concurrent invocations, and a new account can start with a quota of 10. If it is lower, ask for
-a quota increase (Service Quotas → Lambda) before going on.
+The quota check comes after step 2, once nothing can point at LocalStack.
 
 ## 2. Make sure nothing points at LocalStack
 
@@ -42,7 +40,19 @@ env | grep -E 'AWS_ENDPOINT_URL|LOCALSTACK_ENDPOINT' || echo "clean"
 aws configure get endpoint_url || echo none
 ```
 
-Expected: `clean` and `none`. An endpoint variable (or an `endpoint_url` in your profile in
+Now confirm the account and the Lambda quota:
+
+```bash
+aws sts get-caller-identity --query Account --output text      # must equal $AWS_ACCOUNT_ID
+aws lambda get-account-settings --region ap-southeast-2 --query 'AccountLimit.ConcurrentExecutions'
+```
+
+`000000000000` means a LocalStack endpoint is still active. `ConcurrentExecutions` must be at
+least 10: the two event source mappings run up to 5 + 2 concurrent invocations, and a new
+account can start with a quota of 10. If it is lower, ask for a quota increase (Service Quotas
+→ Lambda) before going on.
+
+Expected from the check above: `clean` and `none`. An endpoint variable (or an `endpoint_url` in your profile in
 `~/.aws/config`) would send the generator's AWS clients somewhere else (Terraform would refuse
 at deploy, through `allowed_account_ids`).
 
@@ -70,9 +80,10 @@ make deploy ENV=aws AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID
 ```
 
 The first run downloads the providers (`infra/terraform/.terraform-aws/`). The plan creates
-26 resources: the bus, 2 rules, 2 queues and 2 DLQs, 2 Lambdas with roles and log groups,
-3 DynamoDB tables (`onside-person-state`, `onside-evaluations`, `onside-properties`) and the
-bucket `onside-aws-<account id>`. Answer `y`. Then back up the state until step 8 is done:
+26 resources, among them the bus, 2 rules, 2 queues and 2 DLQs, 2 Lambdas with roles and log
+groups, 3 DynamoDB tables (`onside-person-state`, `onside-evaluations`, `onside-properties`)
+and the bucket `onside-aws-<account id>`, plus EventBridge targets, queue and role policies,
+the two event source mappings and the bucket policy: 26 in all. Answer `y`. Then back up the state until step 8 is done:
 
 ```bash
 cp infra/terraform/state/aws.tfstate ~/onside-aws.tfstate.backup
@@ -102,13 +113,13 @@ settles in about 5 minutes; AWS is usually faster. If a settle times out, resume
 `make settle ENV=aws RUN=<run_id>` command that it prints.
 
 If a command says the stack is gone, do NOT run `make destroy`; first check steps 1–2 in this
-terminal (credentials, account, and no endpoint variable).
+terminal (credentials, account, region and no endpoint variable).
 
 Check the time-zone data once (spec §2: the Lambda reads only its bundled tzdata):
 
 ```bash
 aws logs filter-log-events --log-group-name /aws/lambda/onside-standdown-checker \
-  --filter-pattern '{ $.event = "cold_start" }' --max-items 1 \
+  --region ap-southeast-2 --filter-pattern '{ $.event = "cold_start" }' --max-items 1 \
   --query 'events[0].message' --output text
 ```
 
@@ -124,7 +135,8 @@ make poison ENV=aws K=2
   3 minutes later. A `dead_letter_queues` check can be red in that window, so run poison last
   and let it finish before any dbt build or screenshot.
 - DLQ messages expire after 14 days, while the `control/poison/` records stay. Old demo state
-  therefore turns the check red: rebuild the state if the last poison is older than 14 days.
+  therefore turns the check red: rebuild the state if the last poison is older than 14 days: `make destroy ENV=aws`, then
+  `make deploy` (step 4) and `make setup` (step 6) again.
 
 ## 7. Dagster and the screenshots
 
@@ -135,7 +147,9 @@ In a second terminal, repeat steps 1 and 2: the same `AWS_PROFILE`, `AWS_DEFAULT
 aws sts get-caller-identity --query Account --output text
 ```
 
-prints the same value as `$AWS_ACCOUNT_ID`. Then:
+prints the same value as `$AWS_ACCOUNT_ID`. If the Dagster UI shows the `settled_runs` sensor
+skipping with a hint to run `make destroy ENV=aws`, do NOT run it: that hint means this
+terminal cannot see the stack, so check steps 1–2 first. Then:
 
 ```bash
 make dagster ENV=aws        # http://127.0.0.1:3000; Ctrl-C stops it
@@ -147,6 +161,9 @@ backfill and the live run). Then:
 ```bash
 make trace ENV=aws PROPERTY=<a property id, e.g. from make alerts> START=<ISO time with offset>
 ```
+
+The DynamoDB console's item count refreshes only about every 6 hours: use "Get live item
+count" before taking `aws-06-dynamodb.png`.
 
 Take these screenshots and save them as PNG files under `docs/screenshots/`:
 
@@ -170,18 +187,19 @@ Leave `make dagster` running until the screenshots are done, then stop it with C
 
 ```bash
 make destroy ENV=aws AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID     # type "yes"; also removes state/aws
-aws resourcegroupstaggingapi get-resources \
+aws resourcegroupstaggingapi get-resources --region ap-southeast-2 \
   --tag-filters Key=project,Values=onside-movement-demo --query 'ResourceTagMappingList[].ResourceARN'
 aws iam get-role --role-name onside-standdown-checker
-aws logs describe-log-groups --log-group-name-prefix /aws/lambda/onside \
+aws iam get-role --role-name onside-archiver
+aws logs describe-log-groups --region ap-southeast-2 --log-group-name-prefix /aws/lambda/onside \
   --query 'logGroups[].logGroupName'
 ```
 
 Expected: the destroy plan lists 26 resources; the tag query then returns only the budget
 (or `[]`; tagged resources can take a few minutes to drop out of the index). The tagging API
 is regional and does not list IAM roles (which are global), hence the two extra checks:
-`get-role` must fail with `NoSuchEntity` (the archiver's role is `onside-archiver`; check it
-the same way), and the log-group query must print `[]`. The bucket has `force_destroy`, so its
+both `get-role` commands must fail with `NoSuchEntity`, and the log-group query must print
+`[]`. The bucket has `force_destroy`, so its
 objects go with it.
 
 A cost budget without actions has no charge (check the AWS Budgets pricing page), so it can
