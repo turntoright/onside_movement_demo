@@ -200,7 +200,7 @@ TF_VARS = -var env=$(ENV) \
 	$(if $(filter local,$(ENV)),-var localstack_endpoint=$(LOCALSTACK_ENDPOINT)) \
 	$(if $(filter aws,$(ENV)),-var aws_account_id=$(AWS_ACCOUNT_ID))
 
-.PHONY: infra-env deploy destroy tf-check
+.PHONY: infra-env budget-guard deploy destroy tf-check
 
 infra-env:
 	@if [ "$(origin ENV)" != "command line" ] || { [ "$(ENV)" != local ] && [ "$(ENV)" != aws ]; }; then \
@@ -209,9 +209,18 @@ infra-env:
 # ENV=aws: the saved plan that `make deploy` shows, confirms and then applies.
 TF_PLAN = $(TF_DIR)/state/aws.tfplan
 
+# ENV=aws: refuse until infra/budget's state holds a budget in AWS_ACCOUNT_ID (spec §8: it is
+# created first, by `make budget`).
+budget-guard:
+	@if [ "$(ENV)" = aws ] && ! $(PY) -c 'import json, sys; s = json.load(open(sys.argv[1])); \
+sys.exit(0 if any(r["type"] == "aws_budgets_budget" and any(i["attributes"].get("account_id") == sys.argv[2] \
+for i in r.get("instances", [])) for r in s.get("resources", [])) else 1)' $(BUDGET_STATE) "$(AWS_ACCOUNT_ID)" 2>/dev/null; then \
+		echo "error: no budget for account $(AWS_ACCOUNT_ID) in $(BUDGET_STATE); create it first:" \
+			"make budget ENV=aws AWS_ACCOUNT_ID=<id> BUDGET_EMAIL=<address>" >&2; exit 2; fi
+
 # ENV=local applies without asking. ENV=aws shows the plan and asks before applying it
 # (applying a saved plan never prompts, so the confirmation is ours).
-deploy: infra-env package
+deploy: infra-env budget-guard package
 	mkdir -p $(REPO_ROOT)/infra/terraform/state $(REPO_ROOT)/state/$(ENV)
 	@$(TF_INIT)
 ifeq ($(ENV),aws)
@@ -233,11 +242,47 @@ destroy: infra-env package
 	$(TF) destroy $(if $(filter local,$(ENV)),-input=false -auto-approve) $(TF_VARS)
 	$(if $(filter aws,$(ENV)),rm -rf $(REPO_ROOT)/state/aws)
 
-# Its own data directory without a backend, so it never touches an environment's init.
+# Both roots (the stack and the budget), each with its own data directory and no backend,
+# so it never touches an environment's init.
 tf-check:
-	terraform -chdir=$(TF_DIR) fmt -check -recursive
-	TF_DATA_DIR=$(TF_DIR)/.terraform-check terraform -chdir=$(TF_DIR) init -input=false -backend=false
-	TF_DATA_DIR=$(TF_DIR)/.terraform-check terraform -chdir=$(TF_DIR) validate
+	terraform fmt -check -recursive $(REPO_ROOT)/infra
+	for root in $(TF_DIR) $(BUDGET_DIR); do \
+		TF_DATA_DIR=$$root/.terraform-check terraform -chdir=$$root init -input=false -backend=false \
+		&& TF_DATA_DIR=$$root/.terraform-check terraform -chdir=$$root validate || exit 1; \
+	done
+
+# ---- budget (ENV=aws only; spec §8) ----
+
+BUDGET_DIR := $(REPO_ROOT)/infra/budget
+BUDGET_STATE = $(BUDGET_DIR)/state/aws.tfstate
+BUDGET_PLAN = $(BUDGET_DIR)/state/aws.tfplan
+BUDGET_EMAIL ?=
+BUDGET_TF = CHECKPOINT_DISABLE=1 TF_DATA_DIR=$(BUDGET_DIR)/.terraform-aws terraform -chdir=$(BUDGET_DIR)
+BUDGET_VARS = -var aws_account_id=$(AWS_ACCOUNT_ID) -var email=$(BUDGET_EMAIL)
+
+.PHONY: budget budget-destroy budget-env
+
+budget-env: infra-env
+	@if [ "$(ENV)" != aws ]; then echo "error: the budget is for ENV=aws only" >&2; exit 2; fi
+	@if [ -z "$(AWS_ACCOUNT_ID)" ] || [ -z "$(BUDGET_EMAIL)" ]; then \
+		echo "error: needs AWS_ACCOUNT_ID=<12 digits> and BUDGET_EMAIL=<address>" >&2; exit 2; fi
+
+# The $5 monthly budget with alerts at 80% actual and 100% forecast: shows the plan, asks y/N,
+# applies exactly that plan. Its state is infra/budget/state/aws.tfstate (gitignored).
+budget: budget-env
+	mkdir -p $(BUDGET_DIR)/state
+	$(BUDGET_TF) init -input=false -reconfigure -backend-config=path=$(BUDGET_STATE)
+	$(BUDGET_TF) plan -input=false -out=$(BUDGET_PLAN) $(BUDGET_VARS)
+	@read -r -p "Create this budget in account $(AWS_ACCOUNT_ID)? [y/N] " answer; \
+		if [ "$$answer" != y ] && [ "$$answer" != Y ]; then \
+			rm -f $(BUDGET_PLAN); echo "budget cancelled; nothing applied" >&2; exit 1; fi
+	$(BUDGET_TF) apply -input=false $(BUDGET_PLAN)
+	rm -f $(BUDGET_PLAN)
+
+# After `make destroy ENV=aws`, if the budget should go too. Terraform asks for "yes".
+budget-destroy: budget-env
+	$(BUDGET_TF) init -input=false -reconfigure -backend-config=path=$(BUDGET_STATE)
+	$(BUDGET_TF) destroy $(BUDGET_VARS)
 
 # ---- integration (spec §7.3) ----
 
