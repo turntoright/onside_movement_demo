@@ -1,0 +1,7 @@
+version: 2
+
+models:
+  - name: fct_high_risk_visits
+    columns:
+      - name: checkin_event_id
+        data_tests: [unique, not_null]
