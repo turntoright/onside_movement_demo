@@ -1,6 +1,7 @@
 # Onside movement demo — design
 
-Date: 2026-10-09. Revision 6: blocking issues from reviews 1–5 fixed (see §12).
+Date: 2026-10-09. Revision 6.1: review 6 found no blocking issues; its non-blocking
+notes are folded in (see §12).
 
 ## 1. Purpose
 
@@ -63,8 +64,9 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
 - **Rule A:** `source = onside.app` and detail-type CheckIn or CheckOut, with **no**
   poison filter. Poison events must reach the queue to demo the DLQ. The source filter
   also keeps the Lambda's own events from looping back.
-- **Rule B:** all sources, with `"detail": {"poison": [{"exists": false}]}`, so poison
-  events never reach S3.
+- **Rule B:** `source` in [onside.app, onside.standdown], with
+  `"detail": {"poison": [{"exists": false}]}`, so poison events never reach S3. Day 1
+  verifies `exists:false` on LocalStack.
 
 ### Components
 
@@ -109,8 +111,11 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
   - Loads the generator state and **continues each person's timeline**.
   - Emits N check-ins (plus their check-outs) with `event_time` in the last 30 minutes.
     Some events are received up to 10 minutes late.
-  - It skips people whose last visit is still open, i.e. whose check-out would fall
-    after the previous run's end, so "no overlap" holds.
+  - Each person's live check-in has `event_time` after that person's last visit end.
+    People with no room in the 30-minute window are skipped, so "no overlap" holds
+    even straight after a backfill.
+  - A visit still open at the end of a run never gets a check-out. Downstream infers
+    one (§5). Later runs never send it, so the live lateness bound holds.
   - About 20% of the live check-ins are deliberate stand-down breaches, so alerts
     appear in the demo.
   - It updates the generator state.
@@ -125,8 +130,15 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
     development.
   - `make up` resets `state/local/` and LocalStack's Terraform state, because a
     LocalStack restart wipes its DynamoDB and S3.
+  - `make up` does a full restart (compose down, then up, with persistence off), so the
+    stack is always empty after it.
   - `make reset ENV=sim` clears `state/sim/` and `data/sim/` together.
-  - A backfill refuses to run when the environment already has generator state.
+  - `make destroy ENV=aws` also clears `state/aws/`.
+  - A backfill refuses to run when the environment already has generator state. A
+    failed or partial backfill is recovered only by a reset.
+  - Every `generate` first checks that S3 `control/manifests/` matches
+    `state/<env>/`. If LocalStack lost its data (e.g. after a Docker restart), it fails
+    with a clear message telling you to run `make up`.
   - `state/` and `data/` are gitignored.
 - **Manifests:**
   - Each backfill or live run writes `control/manifests/<run_id>.json` (mode, seed,
@@ -199,8 +211,9 @@ produce hundreds of thousands of them. So nothing downstream reads `raw/` direct
    - Parse each new object (concatenated JSON envelopes).
    - Append its envelopes to a spool file `state/<env>/spool/<run_id>.ndjson`, so
      nothing is held in memory.
-   - Count only **this run's** event_ids per type. The generator holds them in memory;
-     `make settle` rebuilds them from the seed and `run_id`.
+   - Count only **this run's** event_ids per type: `event_id = uuid5(run_id, seq)` with
+     `seq` below the manifest's total, so `make settle` rebuilds the set from the
+     manifest alone. Each event's type comes from its envelope.
    - Leftovers from earlier runs can then never satisfy the gate early.
    - Append to the spool **before** updating the key cache, so a crash causes
      duplicates, never loss.
@@ -383,8 +396,9 @@ incremental by received_time, a lookback window, and recomputing the affected pe
 - Visibility timeout 30 s; Lambda timeout 25 s (it must not exceed the visibility
   timeout).
 - DLQ after 5 receives, with 14-day retention.
-- A poison message reaches the DLQ after about 2.5 minutes. `make poison` waits for
-  the DLQ count to reach the expected value before returning.
+- A poison message reaches the DLQ after about 2.5 minutes. `make poison` waits until
+  the DLQ count is at least the expected value, with a 5-minute timeout. A duplicate
+  delivery may push it above; the DLQ check then uses ≥.
 - Delivery order is **not** assumed, so the processor is order-independent.
 
 **State.**
@@ -503,7 +517,11 @@ matter.
 - **Environment:**
   - Dagster runs only for `local` and `aws`. `sim` uses plain `dbt build`.
   - `make dagster ENV=…` sets the dbt target, the bucket and the DuckDB file
-    `warehouse/<env>.duckdb` (one per environment).
+    `warehouse/<env>.duckdb` (one per environment; sim uses `warehouse/sim.duckdb`).
+  - All local paths in dbt vars are absolute, built from a `REPO_ROOT` environment
+    variable that the Makefile sets.
+  - `make trace ENV=local|aws` goes through Dagster. `make trace ENV=sim` calls the
+    trace module directly on `warehouse/sim.duckdb`.
 - **Sensor:** fires on new `control/settled/` objects, never on raw objects. A
   schedule exists as a backup.
 - **Concurrency:** dbt runs and the trace job share a concurrency pool of size 1, to
@@ -511,8 +529,9 @@ matter.
 - **Asset checks:**
   - **Completeness:** distinct event_ids per type in `compacted/<env>/` equal the
     environment's summed manifests, for CheckIn, CheckOut and PlantMovement.
-  - **DLQ:** `ApproximateNumberOfMessages` equals the summed `control/poison/`
-    manifests. Read the attribute only; never receive messages.
+  - **DLQ:** `ApproximateNumberOfMessages` ≥ the summed `control/poison/` manifests,
+    and the DLQ holds no more than 1 extra per poison event. Read the attribute only;
+    never receive messages.
   - **Freshness:** after a live run, the latest received_time is within 15 minutes of
     the settle time. Skipped for backfill.
 
@@ -566,7 +585,8 @@ matter.
 - **Terraform state:**
   - Kept separately per environment: `infra/terraform/state/<env>.tfstate`, passed
     via `-state`. A backend config per environment works too.
-  - The AWS bucket name includes the account id, so it is globally unique.
+  - The AWS bucket name includes the account id, so it is globally unique. The bucket
+    has `force_destroy = true`, so `make destroy` works on a non-empty bucket.
 - **Real AWS:**
   - Region ap-southeast-2, local Terraform state.
   - A $5 budget alarm is created first; `make destroy` runs after the screenshots,
@@ -725,3 +745,11 @@ Non-blocking items also adopted:
 - Terraform state per environment, unique bucket;
 - Dagster environment and DuckDB file per environment;
 - live runs skip open visits.
+
+**Review 6: 0 blocking issues.** All six non-blocking notes were folded into revision 6.1:
+- AWS reset on destroy, and a manifest consistency check;
+- `make settle` rebuilds ids from the manifest;
+- `make up` does a full restart;
+- live timing after the last visit end, and open visits;
+- rule B source list, bucket `force_destroy`, poison timeout;
+- absolute paths via `REPO_ROOT`, the sim DuckDB name, trace for sim.
