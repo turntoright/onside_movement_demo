@@ -1,0 +1,11 @@
+services:
+  localstack:
+    image: localstack/localstack:${LOCALSTACK_TAG}
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3,sqs,events,firehose,dynamodb,lambda,iam,sts,logs
+      - LOCALSTACK_AUTH_TOKEN=${LOCALSTACK_AUTH_TOKEN:-}
+      - PERSISTENCE=0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
