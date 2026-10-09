@@ -12,7 +12,7 @@ N ?= 50
 # standdown_checker lives under lambdas/; the editable install does not map it.
 GEN_PY := PYTHONPATH=$(REPO_ROOT)/lambdas $(PY)
 
-.PHONY: venv fmt lint unit test setup generate reset
+.PHONY: venv fmt lint unit test setup generate reset dbt-build sim-data
 
 venv:
 	python3 -m venv $(VENV)
@@ -40,3 +40,17 @@ generate:
 
 reset:
 	$(GEN_PY) -m generator reset --env $(ENV)
+
+DBT_ENV = DBT_PROFILES_DIR=$(REPO_ROOT)/dbt \
+	DBT_COMPACTED_GLOB='$(REPO_ROOT)/data/$(ENV)/compacted/*/*.ndjson' \
+	DBT_REF_ROOT='$(REPO_ROOT)/data/$(ENV)/ref/'
+
+dbt-build:
+	mkdir -p $(REPO_ROOT)/warehouse
+	cd dbt && $(DBT_ENV) $(DBT) build --target $(ENV)
+
+sim-data:
+	$(MAKE) reset ENV=sim
+	$(MAKE) setup ENV=sim SCALE=ci
+	$(MAKE) generate ENV=sim MODE=backfill
+	$(MAKE) generate ENV=sim MODE=live N=30

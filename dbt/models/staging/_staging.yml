@@ -1,0 +1,60 @@
+version: 2
+
+models:
+  - name: stg_checkins
+    columns:
+      - name: event_id
+        data_tests: [unique, not_null]
+      - name: property_id
+        data_tests:
+          - relationships:
+              arguments: {to: ref('stg_properties'), field: property_id}
+      - name: person_id
+        data_tests:
+          - relationships:
+              arguments: {to: ref('stg_people'), field: person_id}
+      - name: method
+        data_tests:
+          - accepted_values:
+              arguments: {values: [app, geofence, qr, kiosk, link]}
+  - name: stg_checkouts
+    columns:
+      - name: event_id
+        data_tests: [unique, not_null]
+      - name: checkin_event_id
+        data_tests:
+          - relationships:
+              arguments: {to: ref('stg_checkins'), field: event_id}
+      - name: method
+        data_tests:
+          - accepted_values:
+              arguments: {values: [manual, geofence_auto, end_of_day]}
+  - name: stg_plant_movements
+    columns:
+      - name: event_id
+        data_tests: [unique, not_null]
+  - name: stg_evaluations
+    columns:
+      - name: checkin_event_id
+        data_tests: [unique, not_null]
+  - name: stg_checkout_applied
+    columns:
+      - name: checkout_event_id
+        data_tests: [unique, not_null]
+  - name: stg_realtime_alerts
+    columns:
+      - name: checkin_event_id
+        data_tests: [unique, not_null]
+  - name: stg_properties
+    columns:
+      - name: property_id
+        data_tests: [unique, not_null]
+      - name: property_type
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [poultry, pork, beef, dairy, kiwifruit, vineyard, office, feed_mill]
+  - name: stg_people
+    columns:
+      - name: person_id
+        data_tests: [unique, not_null]

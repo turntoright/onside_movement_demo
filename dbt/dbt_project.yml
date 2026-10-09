@@ -1,0 +1,47 @@
+name: onside_movement
+version: "0.1.0"
+config-version: 2
+profile: onside_movement
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+target-path: target
+clean-targets: [target, dbt_packages]
+
+vars:
+  connected_window_days: 7
+  missed_rate_warn: 0.25
+
+models:
+  onside_movement:
+    staging:
+      +materialized: table
+    intermediate:
+      +materialized: table
+    marts:
+      +materialized: table
+
+seeds:
+  onside_movement:
+    standdown_rules:
+      +column_types:
+        rule_id: varchar
+        from_type: varchar
+        to_type: varchar
+        scope: varchar
+        nights: integer
+    golden_cases:
+      +column_types:
+        case_id: varchar
+        role: varchar
+        visit_id: varchar
+        property_id: varchar
+        property_type: varchar
+        owner_company_id: varchar
+        checkin_time: varchar
+        checkout_time: varchar
+        expected_breach: boolean
+        expected_rule_id: varchar
+        expected_origin_visit_id: varchar
