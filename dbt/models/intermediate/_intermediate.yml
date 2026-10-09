@@ -1,0 +1,31 @@
+version: 2
+
+models:
+  - name: int_visits
+    columns:
+      - name: checkin_event_id
+        data_tests: [unique, not_null]
+      - name: checkout_source
+        data_tests:
+          - accepted_values:
+              arguments: {values: [actual, inferred_next_checkin, inferred_end_of_day]}
+
+unit_tests:
+  - name: int_visits_infers_checkouts
+    model: int_visits
+    given:
+      - input: ref('stg_checkins')
+        rows:
+          - {event_id: a, person_id: u1, property_id: p1, checkin_time: "2026-03-03 09:00:00+13", received_time: "2026-03-03 09:00:05+13"}
+          - {event_id: b, person_id: u1, property_id: p2, checkin_time: "2026-03-03 13:00:00+13", received_time: "2026-03-03 13:00:05+13"}
+          - {event_id: c, person_id: u1, property_id: p3, checkin_time: "2026-03-05 10:00:00+13", received_time: "2026-03-05 10:00:05+13"}
+          - {event_id: d, person_id: u1, property_id: p1, checkin_time: "2026-03-06 10:00:00+13", received_time: "2026-03-06 10:00:05+13"}
+      - input: ref('stg_checkouts')
+        rows:
+          - {event_id: x, checkin_event_id: c, checkout_time: "2026-03-05 12:00:00+13"}
+    expect:
+      rows:
+        - {checkin_event_id: a, visit_end: "2026-03-03 13:00:00+13", checkout_source: inferred_next_checkin, standdown_end: "2026-03-03 09:00:00+13"}
+        - {checkin_event_id: b, visit_end: "2026-03-03 23:59:59+13", checkout_source: inferred_end_of_day, standdown_end: "2026-03-03 13:00:00+13"}
+        - {checkin_event_id: c, visit_end: "2026-03-05 12:00:00+13", checkout_source: actual, standdown_end: "2026-03-05 12:00:00+13"}
+        - {checkin_event_id: d, visit_end: "2026-03-06 23:59:59+13", checkout_source: inferred_end_of_day, standdown_end: "2026-03-06 10:00:00+13"}

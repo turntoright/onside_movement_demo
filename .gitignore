@@ -14,3 +14,4 @@ dbt/dbt_packages/
 infra/terraform/state/
 infra/terraform/.terraform/
 .superpowers/
+dbt/.user.yml
