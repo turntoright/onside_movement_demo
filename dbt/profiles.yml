@@ -8,3 +8,31 @@ onside_movement:
       extensions: [icu, json]
       settings:
         TimeZone: UTC
+    # LocalStack S3 (spec §3.3): path-style, no TLS, LocalStack's fixed test credentials.
+    local:
+      type: duckdb
+      path: "{{ env_var('REPO_ROOT', '.') }}/warehouse/local.duckdb"
+      threads: 4
+      extensions: [icu, json, httpfs]
+      settings:
+        TimeZone: UTC
+      secrets:
+        - type: s3
+          key_id: test
+          secret: test
+          region: ap-southeast-2
+          endpoint: "{{ env_var('LOCALSTACK_S3_HOST', 'localhost:4566') }}"
+          url_style: path
+          use_ssl: false
+    # Real AWS: the default credential chain (Plan 3 deploys it).
+    aws:
+      type: duckdb
+      path: "{{ env_var('REPO_ROOT', '.') }}/warehouse/aws.duckdb"
+      threads: 4
+      extensions: [icu, json, httpfs, aws]
+      settings:
+        TimeZone: UTC
+      secrets:
+        - type: s3
+          provider: credential_chain
+          region: ap-southeast-2

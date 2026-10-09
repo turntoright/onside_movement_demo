@@ -15,6 +15,8 @@ K = 3
 RUN =
 # Optional settle/poison timeout in seconds; passed only when set.
 TIMEOUT =
+# `or` rather than `?=`: an empty shell variable must not produce an empty endpoint.
+LOCALSTACK_ENDPOINT := $(or $(LOCALSTACK_ENDPOINT),http://localhost:4566)
 # Optional pins for reproducible sim data (ISO 8601); passed only when set.
 ANCHOR ?=
 NOW ?=
@@ -23,7 +25,7 @@ NOW ?=
 GEN_PY := PYTHONUNBUFFERED=1 PYTHONPATH=$(REPO_ROOT)/lambdas $(PY)
 
 .PHONY: venv fmt lint unit test setup generate settle poison reset dbt-build sim-data \
-	sim-e2e trace
+	sim-e2e trace alerts
 
 venv:
 	python3 -m venv $(VENV)
@@ -63,13 +65,37 @@ poison:
 reset:
 	$(GEN_PY) -m generator reset --env $(ENV)
 
+# dbt reads local files for sim and S3 for local/aws (spec §3.3 table); the bucket comes
+# from state/<env>/outputs.json, written by `make deploy`.
+ifeq ($(ENV),sim)
+DATA_GLOB = $(REPO_ROOT)/data/sim/compacted/*/*.ndjson
+REF_ROOT = $(REPO_ROOT)/data/sim/ref/
+else
+BUCKET = $(shell $(PY) -c 'import json, sys; print(json.load(open(sys.argv[1]))["bucket"]["value"])' \
+	$(REPO_ROOT)/state/$(ENV)/outputs.json 2>/dev/null)
+DATA_GLOB = s3://$(BUCKET)/compacted/$(ENV)/*/*.ndjson
+REF_ROOT = s3://$(BUCKET)/ref/
+endif
+
+# LOCALSTACK_S3_HOST (host:port, no scheme) feeds the dbt `local` profile's S3 secret.
 DBT_ENV = DBT_PROFILES_DIR=$(REPO_ROOT)/dbt \
-	DBT_COMPACTED_GLOB='$(REPO_ROOT)/data/$(ENV)/compacted/*/*.ndjson' \
-	DBT_REF_ROOT='$(REPO_ROOT)/data/$(ENV)/ref/'
+	LOCALSTACK_S3_HOST='$(patsubst http://%,%,$(LOCALSTACK_ENDPOINT))' \
+	DBT_COMPACTED_GLOB='$(DATA_GLOB)' \
+	DBT_REF_ROOT='$(REF_ROOT)'
 
 dbt-build:
+	@if [ "$(ENV)" != sim ] && [ -z "$(BUCKET)" ]; then \
+		echo "error: no bucket in state/$(ENV)/outputs.json; run make deploy ENV=$(ENV)" >&2; exit 2; fi
 	mkdir -p $(REPO_ROOT)/warehouse
 	cd dbt && $(DBT_ENV) $(DBT) build --target $(ENV)
+
+# Spec §9 step 2: stand-down alerts show up in the checker Lambda's logs (ENV=local only).
+alerts:
+	@if [ "$(ENV)" != local ]; then echo "error: alerts needs ENV=local" >&2; exit 2; fi
+	@$(GEN_PY) -c 'from generator.aws import client; \
+	events = client("local", "logs").filter_log_events( \
+	logGroupName="/aws/lambda/onside-standdown-checker", filterPattern="\"alert\"")["events"]; \
+	print(f"{len(events)} alert log events (first page)")'
 
 sim-data:
 	$(MAKE) reset ENV=sim
@@ -116,8 +142,6 @@ package:
 
 # ---- infrastructure (ENV=local|aws, always explicit) ----
 
-# `or` rather than `?=`: an empty shell variable must not produce an empty endpoint.
-LOCALSTACK_ENDPOINT := $(or $(LOCALSTACK_ENDPOINT),http://localhost:4566)
 # ENV=aws only: the 12-digit account Terraform may touch (make deploy ENV=aws AWS_ACCOUNT_ID=...).
 AWS_ACCOUNT_ID ?=
 TF := terraform -chdir=$(REPO_ROOT)/infra/terraform
