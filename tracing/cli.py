@@ -1,10 +1,11 @@
-"""Command line tracing over the warehouse (spec §5 Tracing; Plan 3 adds a Dagster job)."""
+"""Tracing over the warehouse (spec §5 Tracing): the CLI for sim and the Dagster job's code path."""
 
 from __future__ import annotations
 
 import argparse
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import duckdb
@@ -27,6 +28,10 @@ from stg_plant_movements
 """
 
 
+class TraceError(ValueError):
+    """A user-facing tracing error (unknown property, bad start time, no warehouse)."""
+
+
 def load_edges(con: duckdb.DuckDBPyConnection) -> list[Edge]:
     return [
         Edge(src, dst, float(dep), float(arr))
@@ -34,8 +39,58 @@ def load_edges(con: duckdb.DuckDBPyConnection) -> list[Edge]:
     ]
 
 
-def _local(epoch: float) -> str:
-    return datetime.fromtimestamp(epoch, tz=UTC).astimezone(NZ).strftime("%Y-%m-%d %H:%M")
+def parse_start(value: str) -> datetime:
+    try:
+        start = datetime.fromisoformat(value)
+    except ValueError:
+        raise TraceError(f"start time {value!r} is not ISO 8601") from None
+    if start.tzinfo is None:
+        raise TraceError(f"start time {value!r} needs a UTC offset, e.g. +12:00")
+    return start
+
+
+def trace_warehouse(db: Path | str, property_id: str, start: str, max_hops: int) -> list[dict]:
+    """Trace from one property over a read-only warehouse; one dict per reached property."""
+    started = parse_start(start)
+    if max_hops < 0:
+        raise TraceError(f"max_hops must be 0 or more, not {max_hops}")
+    if not Path(db).exists():
+        raise TraceError(f"no warehouse at {db}; build it first (dbt build)")
+    con = duckdb.connect(str(db), read_only=True)
+    try:
+        known = con.execute(
+            "select property_type from stg_properties where property_id = ?", [property_id]
+        ).fetchone()
+        if known is None:
+            raise TraceError(f"unknown property {property_id}")
+        types = dict(con.sql("select property_id, property_type from stg_properties").fetchall())
+        reached = trace(load_edges(con), property_id, started.timestamp(), max_hops)
+    finally:
+        con.close()
+    return [
+        {
+            "property_id": r.property_id,
+            "property_type": types.get(r.property_id, "?"),
+            "hops": r.hops,
+            "arrival": datetime.fromtimestamp(r.arrival, tz=UTC).astimezone(NZ).isoformat(),
+            "path": list(r.path),
+        }
+        for r in reached
+    ]
+
+
+def format_table(rows: list[dict], property_id: str, max_hops: int) -> str:
+    lines = [
+        f"{len(rows)} properties reached from {property_id} within {max_hops} hops",
+        f"{'hops':>4}  {'property':<8}  {'type':<10}  {'earliest arrival':<16}  path",
+    ]
+    for r in rows:
+        local = datetime.fromisoformat(r["arrival"]).astimezone(NZ).strftime("%Y-%m-%d %H:%M")
+        lines.append(
+            f"{r['hops']:>4}  {r['property_id']:<8}  {r['property_type']:<10}  "
+            f"{local:<16}  {' -> '.join(r['path'])}"
+        )
+    return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -45,24 +100,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--start", required=True, help="infection start, ISO 8601 with offset")
     parser.add_argument("--max-hops", type=int, default=3)
     args = parser.parse_args(argv)
-
-    con = duckdb.connect(args.db, read_only=True)
-    known = con.execute(
-        "select property_type from stg_properties where property_id = ?", [args.property]
-    ).fetchone()
-    if known is None:
-        print(f"error: unknown property {args.property}", file=sys.stderr)
+    try:
+        rows = trace_warehouse(args.db, args.property, args.start, args.max_hops)
+    except TraceError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
-    types = dict(con.sql("select property_id, property_type from stg_properties").fetchall())
-    start = datetime.fromisoformat(args.start).timestamp()
-    results = trace(load_edges(con), args.property, start, args.max_hops)
-    con.close()
-
-    print(f"{len(results)} properties reached from {args.property} within {args.max_hops} hops")
-    print(f"{'hops':>4}  {'property':<8}  {'type':<10}  {'earliest arrival':<16}  path")
-    for r in results:
-        print(
-            f"{r.hops:>4}  {r.property_id:<8}  {types.get(r.property_id, '?'):<10}  "
-            f"{_local(r.arrival):<16}  {' -> '.join(r.path)}"
-        )
+    print(format_table(rows, args.property, args.max_hops))
     return 0
