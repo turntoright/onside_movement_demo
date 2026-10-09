@@ -140,8 +140,8 @@ make poison ENV=aws K=2
 
 ## 7. Dagster and the screenshots
 
-In a second terminal, repeat steps 1 and 2: the same `AWS_PROFILE`, `AWS_DEFAULT_REGION` and
-`AWS_ACCOUNT_ID` exports, then the endpoint unset and the `clean`/`none` check. Confirm that
+In a second terminal, repeat steps 1 and 2: the same `AWS_PROFILE`, `AWS_REGION`,
+`AWS_DEFAULT_REGION` and `AWS_ACCOUNT_ID` exports, then the endpoint unset and the `clean`/`none` check. Confirm that
 
 ```bash
 aws sts get-caller-identity --query Account --output text
