@@ -15,3 +15,5 @@ infra/terraform/state/
 infra/terraform/.terraform/
 .superpowers/
 dbt/.user.yml
+*.tfstate
+*.tfstate.*

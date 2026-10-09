@@ -113,3 +113,39 @@ package:
 	cp -r "$$($(PY) -c 'import tzdata, os; print(os.path.dirname(tzdata.__file__))')" $(REPO_ROOT)/build/standdown_checker/
 	cp -r $(REPO_ROOT)/lambdas/archiver $(REPO_ROOT)/build/archiver/
 	find $(REPO_ROOT)/build -name __pycache__ -type d -prune -exec rm -rf {} +
+
+# ---- infrastructure (ENV=local|aws, always explicit) ----
+
+# `or` rather than `?=`: an empty shell variable must not produce an empty endpoint.
+LOCALSTACK_ENDPOINT := $(or $(LOCALSTACK_ENDPOINT),http://localhost:4566)
+AWS_ACCOUNT_ID ?=
+TF := terraform -chdir=$(REPO_ROOT)/infra/terraform
+# One local state file per environment: infra/terraform/state/<env>.tfstate (spec §8).
+TF_INIT = $(TF) init -input=false -reconfigure \
+	-backend-config=path=$(REPO_ROOT)/infra/terraform/state/$(ENV).tfstate
+# ENV=local always carries the LocalStack endpoint; ENV=aws carries the account allow-list.
+TF_VARS = -var env=$(ENV) \
+	$(if $(filter local,$(ENV)),-var localstack_endpoint=$(LOCALSTACK_ENDPOINT)) \
+	$(if $(filter aws,$(ENV)),-var aws_account_id=$(AWS_ACCOUNT_ID))
+
+.PHONY: infra-env deploy destroy tf-check
+
+infra-env:
+	@if [ "$(origin ENV)" != "command line" ] || { [ "$(ENV)" != local ] && [ "$(ENV)" != aws ]; }; then \
+		echo "error: this target needs ENV=local or ENV=aws on the command line" >&2; exit 2; fi
+
+deploy: infra-env package
+	mkdir -p $(REPO_ROOT)/infra/terraform/state $(REPO_ROOT)/state/$(ENV)
+	$(TF_INIT)
+	$(TF) apply -input=false -auto-approve $(TF_VARS)
+	$(TF) output -json > $(REPO_ROOT)/state/$(ENV)/outputs.json
+
+destroy: infra-env package
+	$(TF_INIT)
+	$(TF) destroy -input=false -auto-approve $(TF_VARS)
+	$(if $(filter aws,$(ENV)),rm -rf $(REPO_ROOT)/state/aws)
+
+tf-check:
+	$(TF) fmt -check -recursive
+	$(TF) init -input=false -backend=false
+	$(TF) validate
