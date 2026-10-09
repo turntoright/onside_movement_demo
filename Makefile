@@ -24,8 +24,8 @@ NOW ?=
 # Unbuffered, so emit and settle progress shows up while a long run is going.
 GEN_PY := PYTHONUNBUFFERED=1 PYTHONPATH=$(REPO_ROOT)/lambdas $(PY)
 
-.PHONY: venv fmt lint unit test setup generate settle poison reset dbt-build sim-data \
-	sim-e2e trace alerts
+.PHONY: venv fmt lint unit test setup generate settle poison reset dbt-build dbt-debug \
+	sim-data sim-e2e trace alerts
 
 venv:
 	python3 -m venv $(VENV)
@@ -93,6 +93,12 @@ dbt-build:
 		echo "error: no bucket in state/$(ENV)/outputs.json; run make deploy ENV=$(ENV)" >&2; exit 2; fi
 	mkdir -p $(REPO_ROOT)/warehouse
 	cd dbt && $(DBT_ENV) $(DBT) build --target $(ENV)
+
+# Checks the target's profile and connection; DuckDB installs httpfs (and aws) on first use,
+# so run it once online before the first AWS build (docs/aws-deploy.md, step 5).
+dbt-debug:
+	mkdir -p $(REPO_ROOT)/warehouse
+	cd dbt && $(DBT_ENV) $(DBT) debug --target $(ENV)
 
 # Spec §9 step 2: stand-down alerts show up in the checker Lambda's logs.
 alerts:

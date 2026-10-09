@@ -1,4 +1,5 @@
 import json
+import zoneinfo
 
 import pytest
 from standdown_checker import handler as H
@@ -181,3 +182,17 @@ def test_lambda_entry_point_uses_environment(aws, monkeypatch):
     assert failures(result) == ["m2"]
     item = aws.dynamodb.get_item(TableName=EVALUATION_TABLE, Key={"checkin_event_id": {"S": "A"}})
     assert "Item" in item
+
+
+def test_a_cold_start_logs_the_time_zone_search_path_once(aws, monkeypatch, capsys):
+    monkeypatch.setenv("PERSON_TABLE", PERSON_TABLE)
+    monkeypatch.setenv("EVALUATION_TABLE", EVALUATION_TABLE)
+    monkeypatch.setenv("PROPERTY_TABLE", PROPERTY_TABLE)
+    monkeypatch.setenv("EVENT_BUS_NAME", aws.bus_name)
+    monkeypatch.setenv("RULES_PATH", str(ROOT / "shared" / "standdown_rules.csv"))
+    monkeypatch.setattr(H, "_DEPENDENCIES", None)
+    H._dependencies()
+    H._dependencies()  # a warm container logs nothing more
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    # On AWS, PYTHONTZPATH="" makes this [] (the bundled tzdata only; runbook step 6).
+    assert lines == [{"event": "cold_start", "level": "info", "tzpath": list(zoneinfo.TZPATH)}]

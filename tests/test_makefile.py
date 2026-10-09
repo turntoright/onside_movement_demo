@@ -73,3 +73,9 @@ def test_dbt_s3_secrets_take_the_region_of_the_stack():
     for target in ("local", "aws"):
         [secret] = profiles["outputs"][target]["secrets"]
         assert secret["region"] == "{{ env_var('DBT_S3_REGION', 'ap-southeast-2') }}"
+
+
+def test_dbt_debug_checks_the_target_with_the_stack_region(deployed_root):
+    out = make("-n", "dbt-debug", "ENV=local", root=deployed_root).stdout
+    assert "DBT_S3_REGION='us-west-2'" in out
+    assert out.rstrip().endswith("debug --target local")
