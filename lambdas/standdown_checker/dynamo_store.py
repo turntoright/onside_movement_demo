@@ -85,9 +85,12 @@ class DynamoDbStore:
             except (
                 self.client.exceptions.ConditionalCheckFailedException,
                 self.client.exceptions.TransactionConflictException,
-            ):
+            ) as exc:
                 # Stale version, or a concurrent transaction on this item: reload and retry.
-                raise ConflictError(f"{person_id}: version {version_read} is stale") from None
+                code = exc.response["Error"]["Code"]
+                raise ConflictError(
+                    f"{person_id}: version {version_read} not committed ({code})"
+                ) from None
             return
         put = {
             "TableName": self.evaluation_table,
