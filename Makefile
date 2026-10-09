@@ -118,6 +118,7 @@ package:
 
 # `or` rather than `?=`: an empty shell variable must not produce an empty endpoint.
 LOCALSTACK_ENDPOINT := $(or $(LOCALSTACK_ENDPOINT),http://localhost:4566)
+# ENV=aws only: the 12-digit account Terraform may touch (make deploy ENV=aws AWS_ACCOUNT_ID=...).
 AWS_ACCOUNT_ID ?=
 TF := terraform -chdir=$(REPO_ROOT)/infra/terraform
 # One local state file per environment: infra/terraform/state/<env>.tfstate (spec §8).
@@ -138,7 +139,8 @@ deploy: infra-env package
 	mkdir -p $(REPO_ROOT)/infra/terraform/state $(REPO_ROOT)/state/$(ENV)
 	$(TF_INIT)
 	$(TF) apply -input=false -auto-approve $(TF_VARS)
-	$(TF) output -json > $(REPO_ROOT)/state/$(ENV)/outputs.json
+	$(TF) output -json > $(REPO_ROOT)/state/$(ENV)/outputs.json.tmp
+	mv $(REPO_ROOT)/state/$(ENV)/outputs.json.tmp $(REPO_ROOT)/state/$(ENV)/outputs.json
 
 destroy: infra-env package
 	$(TF_INIT)
