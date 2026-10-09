@@ -63,3 +63,51 @@ class InMemoryStore:
             store.persons = data["persons"]
             store.evaluations = data["evaluations"]
         return store
+
+
+def envelope(source: str, detail_type: str, time_iso: str, detail: dict, envelope_id: str) -> dict:
+    """The subset of an EventBridge envelope that staging reads (spec §5)."""
+    return {
+        "id": envelope_id,
+        "source": source,
+        "detail-type": detail_type,
+        "time": time_iso,
+        "detail": detail,
+    }
+
+
+def run_sim(emissions, store, rules, out_dir: Path) -> dict[str, int]:
+    """Process emissions in send order, as the Lambda would, and write NDJSON like compacted/."""
+    from standdown_checker.events import iso
+    from standdown_checker.processor import process_event
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    counts: dict[str, int] = {}
+    with (
+        open(out_dir / "generator.ndjson", "w") as gen,
+        open(out_dir / "standdown.ndjson", "w") as derived,
+    ):
+        for i, em in enumerate(emissions):
+            env = envelope(
+                em.source, em.detail_type, iso(em.send_time), em.detail,
+                f"{em.detail['event_id']}#{i}",
+            )  # fmt: skip
+            gen.write(json.dumps(env, sort_keys=True) + "\n")
+            if em.detail_type not in ("CheckIn", "CheckOut"):
+                continue
+            outbound = process_event(
+                em.detail_type,
+                em.detail,
+                store,
+                rules,
+                lambda em=em: em.send_time,  # simulated clock: processed when received
+                sleep=lambda seconds: None,
+            )
+            for j, out in enumerate(outbound):
+                counts[out.detail_type] = counts.get(out.detail_type, 0) + 1
+                env = envelope(
+                    out.source, out.detail_type, out.detail["processed_at"], out.detail,
+                    f"{out.detail['event_id']}#{i}.{j}",
+                )  # fmt: skip
+                derived.write(json.dumps(env, sort_keys=True) + "\n")
+    return counts
