@@ -204,7 +204,7 @@ TF_INIT = if [ "$$(cat $(TF_STAMP) 2>/dev/null)" != "$$($(TF_INIT_KEY))" ]; then
 # ENV=local always carries the LocalStack endpoint; ENV=aws carries the account allow-list.
 TF_VARS = -var env=$(ENV) \
 	$(if $(filter local,$(ENV)),-var localstack_endpoint=$(LOCALSTACK_ENDPOINT)) \
-	$(if $(filter aws,$(ENV)),-var aws_account_id=$(AWS_ACCOUNT_ID))
+	$(if $(filter aws,$(ENV)),-var 'aws_account_id=$(AWS_ACCOUNT_ID)')
 
 .PHONY: infra-env budget-guard deploy destroy tf-check
 
@@ -215,9 +215,11 @@ infra-env:
 # ENV=aws: the saved plan that `make deploy` shows, confirms and then applies.
 TF_PLAN = $(TF_DIR)/state/aws.tfplan
 
-# ENV=aws: refuse until infra/budget's state holds a budget in AWS_ACCOUNT_ID (spec §8: it is
-# created first, by `make budget`).
+# ENV=aws: refuse an AWS_ACCOUNT_ID that is not 12 digits, then refuse until infra/budget's
+# state holds a budget in that account (spec §8: it is created first, by `make budget`).
 budget-guard:
+	@if [ "$(ENV)" = aws ] && ! [[ "$(AWS_ACCOUNT_ID)" =~ ^[0-9]{12}$$ ]]; then \
+		echo "error: AWS_ACCOUNT_ID must be 12 digits, got '$(AWS_ACCOUNT_ID)'" >&2; exit 2; fi
 	@if [ "$(ENV)" = aws ] && ! $(PY) -c 'import json, sys; s = json.load(open(sys.argv[1])); \
 sys.exit(0 if any(r["type"] == "aws_budgets_budget" and any(i["attributes"].get("account_id") == sys.argv[2] \
 for i in r.get("instances", [])) for r in s.get("resources", [])) else 1)' $(BUDGET_STATE) "$(AWS_ACCOUNT_ID)" 2>/dev/null; then \
@@ -264,7 +266,7 @@ BUDGET_STATE = $(BUDGET_DIR)/state/aws.tfstate
 BUDGET_PLAN = $(BUDGET_DIR)/state/aws.tfplan
 BUDGET_EMAIL ?=
 BUDGET_TF = CHECKPOINT_DISABLE=1 TF_DATA_DIR=$(BUDGET_DIR)/.terraform-aws terraform -chdir=$(BUDGET_DIR)
-BUDGET_VARS = -var aws_account_id=$(AWS_ACCOUNT_ID) -var email=$(BUDGET_EMAIL)
+BUDGET_VARS = -var 'aws_account_id=$(AWS_ACCOUNT_ID)' -var 'email=$(BUDGET_EMAIL)'
 
 .PHONY: budget budget-destroy budget-env
 

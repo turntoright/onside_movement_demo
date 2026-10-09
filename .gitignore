@@ -15,6 +15,7 @@ infra/terraform/state/
 infra/terraform/.terraform/
 infra/terraform/.terraform-*/
 infra/budget/state/
+infra/budget/.terraform/
 infra/budget/.terraform-*/
 .superpowers/
 dbt/.user.yml
