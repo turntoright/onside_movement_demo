@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-ENVS = ("sim",)  # Plan 2 adds "local" and "aws"
+ENVS = ("sim", "local", "aws")
 
 
 @dataclass(frozen=True)
@@ -24,7 +24,10 @@ SCALES = {
     "default": Scale("default", 500, 2000, 120, 40, 100_000),
     "aws": Scale("aws", 40, 100, 12, 6, 3_000),
     "ci": Scale("ci", 80, 200, 20, 8, 5_000),
+    "local": Scale("local", 200, 600, 50, 15, 10_000),
 }
+# The scale `setup` uses when none is given (spec §3.2 "Scale per environment").
+DEFAULT_SCALE = {"sim": "ci", "local": "local", "aws": "aws"}
 
 
 def repo_root() -> Path:

@@ -39,7 +39,23 @@ def save_state(env: str, state: dict) -> None:
     write_json(state_dir(env) / "generator_state.json", state)
 
 
-def write_manifest(env: str, run_id: str, mode: str, seed: int, counts: dict[str, int]) -> dict:
+def reset_hint(env: str) -> str:
+    """How to start an environment again (spec §3.2)."""
+    if env == "local":
+        return "run `make up` (LocalStack restarts empty), then deploy and setup again"
+    if env == "aws":
+        return "run `make destroy ENV=aws`, then deploy and setup again"
+    return f"run `make reset ENV={env}` and start again"
+
+
+def write_manifest(
+    env: str,
+    run_id: str,
+    mode: str,
+    seed: int,
+    counts: dict[str, int],
+    started_at: str | None = None,
+) -> dict:
     manifest = {
         "run_id": run_id,
         "mode": mode,
@@ -47,9 +63,17 @@ def write_manifest(env: str, run_id: str, mode: str, seed: int, counts: dict[str
         "env": env,
         "counts": counts,
         "total": sum(counts.values()),
+        "started_at": started_at,  # wall clock (UTC) before emitting; None for sim
     }
     write_json(state_dir(env) / "manifests" / f"{run_id}.json", manifest)
     return manifest
+
+
+def read_manifest(env: str, run_id: str) -> dict:
+    path = state_dir(env) / "manifests" / f"{run_id}.json"
+    if not path.exists():
+        raise GeneratorError(f"no manifest for run {run_id!r} in state/{env}/manifests")
+    return json.loads(path.read_text())
 
 
 def manifest_ids(env: str) -> set[str]:
@@ -63,5 +87,15 @@ def check_consistency(env: str, state: dict | None) -> None:
     if found != runs:
         raise GeneratorError(
             f"ENV={env} manifests {sorted(found)} do not match generator state {sorted(runs)}; "
-            f"run `make reset ENV={env}` and start again"
+            f"{reset_hint(env)}"
+        )
+
+
+def check_remote_consistency(env: str, state: dict | None, remote_ids: set[str]) -> None:
+    """S3 control/manifests/ must match state/<env>/ (spec §3.2), e.g. after a lost LocalStack."""
+    runs = set(state["runs"]) if state else set()
+    if remote_ids != runs:
+        raise GeneratorError(
+            f"ENV={env}: S3 control/manifests {sorted(remote_ids)} do not match "
+            f"state/{env} runs {sorted(runs)}; {reset_hint(env)}"
         )
