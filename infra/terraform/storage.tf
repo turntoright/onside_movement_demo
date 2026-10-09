@@ -23,7 +23,7 @@ resource "aws_s3_bucket_policy" "data" {
 }
 
 resource "aws_dynamodb_table" "person_state" {
-  name         = "person_state"
+  name         = "onside-person-state"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "person_id"
 
@@ -34,7 +34,7 @@ resource "aws_dynamodb_table" "person_state" {
 }
 
 resource "aws_dynamodb_table" "evaluations" {
-  name         = "evaluations"
+  name         = "onside-evaluations"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "checkin_event_id"
 
@@ -45,7 +45,7 @@ resource "aws_dynamodb_table" "evaluations" {
 }
 
 resource "aws_dynamodb_table" "properties" {
-  name         = "properties"
+  name         = "onside-properties"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "property_id"
 

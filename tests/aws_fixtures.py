@@ -7,10 +7,14 @@ from dataclasses import dataclass
 import boto3
 
 REGION = "ap-southeast-2"
+# The Terraform table names (infra/terraform/storage.tf; M7: the onside- prefix).
+PERSON_TABLE = "onside-person-state"
+EVALUATION_TABLE = "onside-evaluations"
+PROPERTY_TABLE = "onside-properties"
 TABLE_KEYS = {
-    "person_state": "person_id",
-    "evaluations": "checkin_event_id",
-    "properties": "property_id",
+    PERSON_TABLE: "person_id",
+    EVALUATION_TABLE: "checkin_event_id",
+    PROPERTY_TABLE: "property_id",
 }
 
 
@@ -51,9 +55,9 @@ class MotoStack:
         values = {
             "region": REGION,
             "bucket": self.bucket,
-            "person_table": "person_state",
-            "evaluation_table": "evaluations",
-            "property_table": "properties",
+            "person_table": PERSON_TABLE,
+            "evaluation_table": EVALUATION_TABLE,
+            "property_table": PROPERTY_TABLE,
             "bus_name": self.bus_name,
             "visit_queue_url": self.queue_urls["visit_queue"],
             "visit_dlq_url": self.queue_urls["visit_dlq"],
@@ -67,7 +71,7 @@ class MotoStack:
     def put_properties(self, properties: dict[str, dict]) -> None:
         for property_id, prop in properties.items():
             self.dynamodb.put_item(
-                TableName="properties",
+                TableName=PROPERTY_TABLE,
                 Item={
                     "property_id": {"S": property_id},
                     "property_type": {"S": prop["property_type"]},

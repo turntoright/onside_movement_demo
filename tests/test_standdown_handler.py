@@ -5,6 +5,7 @@ from standdown_checker import handler as H
 from standdown_checker.dynamo_store import DynamoDbStore
 from standdown_checker.store import ConflictError
 
+from tests.aws_fixtures import EVALUATION_TABLE, PERSON_TABLE, PROPERTY_TABLE
 from tests.helpers import PROPERTIES, ROOT, RULES, TickingClock, checkin, checkout
 
 
@@ -51,7 +52,7 @@ def sqs_event(*records: dict) -> dict:
 @pytest.fixture
 def store(aws):
     aws.put_properties(PROPERTIES)
-    return DynamoDbStore(aws.dynamodb, "person_state", "evaluations", "properties")
+    return DynamoDbStore(aws.dynamodb, PERSON_TABLE, EVALUATION_TABLE, PROPERTY_TABLE)
 
 
 def call(event, store, events, **kwargs):
@@ -166,9 +167,9 @@ def test_exhausted_retries_fail_the_record(store, monkeypatch):
 
 def test_lambda_entry_point_uses_environment(aws, monkeypatch):
     aws.put_properties(PROPERTIES)
-    monkeypatch.setenv("PERSON_TABLE", "person_state")
-    monkeypatch.setenv("EVALUATION_TABLE", "evaluations")
-    monkeypatch.setenv("PROPERTY_TABLE", "properties")
+    monkeypatch.setenv("PERSON_TABLE", PERSON_TABLE)
+    monkeypatch.setenv("EVALUATION_TABLE", EVALUATION_TABLE)
+    monkeypatch.setenv("PROPERTY_TABLE", PROPERTY_TABLE)
     monkeypatch.setenv("EVENT_BUS_NAME", aws.bus_name)
     monkeypatch.setenv("RULES_PATH", str(ROOT / "shared" / "standdown_rules.csv"))
     monkeypatch.setattr(H, "_DEPENDENCIES", None)
@@ -178,5 +179,5 @@ def test_lambda_entry_point_uses_environment(aws, monkeypatch):
     )
     result = H.handler(batch, None)
     assert failures(result) == ["m2"]
-    item = aws.dynamodb.get_item(TableName="evaluations", Key={"checkin_event_id": {"S": "A"}})
+    item = aws.dynamodb.get_item(TableName=EVALUATION_TABLE, Key={"checkin_event_id": {"S": "A"}})
     assert "Item" in item

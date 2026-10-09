@@ -9,6 +9,7 @@ from botocore.exceptions import ClientError, EndpointConnectionError
 from generator import aws as A
 from generator import cli
 from generator.cli import main
+from tests.aws_fixtures import PROPERTY_TABLE
 
 ROOT = Path(__file__).resolve().parents[1]
 ANCHOR = "2026-10-01T00:00:00+00:00"
@@ -39,7 +40,7 @@ def s3_json(aws, key: str):
 def test_setup_loads_the_same_snapshot_into_s3_and_dynamodb(aws, repo):
     assert main(["setup", "--env", "local", "--scale", "ci"]) == 0
     assert s3_keys(aws, "ref/") == ["ref/companies.json", "ref/people.json", "ref/properties.json"]
-    items = aws.dynamodb.scan(TableName="properties")["Items"]
+    items = aws.dynamodb.scan(TableName=PROPERTY_TABLE)["Items"]
     local = json.loads((repo / "data" / "local" / "ref" / "properties.json").read_text())
     assert len(items) == len(local) == 80
     assert s3_json(aws, "ref/properties.json") == local

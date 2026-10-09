@@ -3,13 +3,14 @@ from botocore.stub import Stubber
 from standdown_checker.dynamo_store import DynamoDbStore
 from standdown_checker.store import ConflictError
 
+from tests.aws_fixtures import EVALUATION_TABLE, PERSON_TABLE, PROPERTY_TABLE
 from tests.helpers import PROPERTIES, checkin, checkout, run
 from tests.store_contract import *  # noqa: F403  (contract suite, collected for DynamoDbStore)
 from tests.store_contract import PROPS, VISIT
 
 
 def make_store(stack) -> DynamoDbStore:
-    return DynamoDbStore(stack.dynamodb, "person_state", "evaluations", "properties")
+    return DynamoDbStore(stack.dynamodb, PERSON_TABLE, EVALUATION_TABLE, PROPERTY_TABLE)
 
 
 @pytest.fixture
@@ -42,9 +43,9 @@ def test_first_commit_sends_no_unused_read_value(aws):
 
 def test_items_hold_json_strings(aws):
     make_store(aws).commit("U1", 0, [VISIT], {"checkin_event_id": "A", "nights": 2})
-    person = aws.dynamodb.get_item(TableName="person_state", Key={"person_id": {"S": "U1"}})
+    person = aws.dynamodb.get_item(TableName=PERSON_TABLE, Key={"person_id": {"S": "U1"}})
     evaluation = aws.dynamodb.get_item(
-        TableName="evaluations", Key={"checkin_event_id": {"S": "A"}}
+        TableName=EVALUATION_TABLE, Key={"checkin_event_id": {"S": "A"}}
     )
     assert person["Item"]["version"] == {"N": "1"}
     assert person["Item"]["visits"]["S"].startswith("[{")
@@ -55,7 +56,7 @@ def test_property_is_cached_per_store(aws):
     aws.put_properties(PROPS)
     store = make_store(aws)
     assert store.get_property("P1") == PROPS["P1"]
-    aws.dynamodb.delete_item(TableName="properties", Key={"property_id": {"S": "P1"}})
+    aws.dynamodb.delete_item(TableName=PROPERTY_TABLE, Key={"property_id": {"S": "P1"}})
     assert store.get_property("P1") == PROPS["P1"]  # served from the container cache
 
 
