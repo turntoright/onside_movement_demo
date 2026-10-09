@@ -3,7 +3,7 @@ onside_movement:
   outputs:
     sim:
       type: duckdb
-      path: "{{ env_var('REPO_ROOT') }}/warehouse/sim.duckdb"
+      path: "{{ env_var('REPO_ROOT', '.') }}/warehouse/sim.duckdb"
       threads: 4
       extensions: [icu, json]
       settings:

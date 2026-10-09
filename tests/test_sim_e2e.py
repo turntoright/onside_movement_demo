@@ -84,3 +84,13 @@ def test_reset_clears_state_and_data(repo):
     assert main(["reset", "--env", "sim"]) == 0
     assert not (repo / "state" / "sim").exists()
     assert not (repo / "data" / "sim").exists()
+
+
+def test_backfills_with_different_anchors_get_different_run_ids(repo):
+    ids = []
+    for anchor in (ANCHOR, "2026-10-02T00:00:00+00:00"):
+        main(["reset", "--env", "sim"])
+        assert main(["setup", "--env", "sim", "--scale", "ci"]) == 0
+        assert main(["generate", "--env", "sim", "--mode", "backfill", "--anchor", anchor]) == 0
+        ids.append(run_dirs(repo)[0].name)
+    assert ids[0] != ids[1]

@@ -73,7 +73,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
                 f"Run `make reset ENV={args.env}` to start again."
             )
         anchor = _ts(args.anchor) or _now()
-        run_id = str(uuid.uuid5(RUN_NAMESPACE, f"{seed}:backfill"))
+        run_id = str(uuid.uuid5(RUN_NAMESPACE, f"{seed}:backfill:{anchor.isoformat()}"))
         rng = random.Random(f"{seed}:backfill")
         visits, plants = plan_backfill(ref, scale, rng, anchor)
         run_end, lateness, shortfall = anchor, BACKFILL_LATENESS, 0
@@ -111,7 +111,8 @@ def cmd_generate(args: argparse.Namespace) -> int:
     update_cursors(state["cursors"], visits)
     state["runs"].append(run_id)
     S.save_state(args.env, state)
-    print(f"{args.mode} run {run_id}: {counts} -> {derived}")
+    anchor_note = f" anchor={state['anchor']}" if args.mode == "backfill" else ""
+    print(f"{args.mode} run {run_id}{anchor_note}: {counts} -> {derived}")
     if shortfall:
         print(f"note: {shortfall} requested check-ins did not fit (no one had room)")
     return 0

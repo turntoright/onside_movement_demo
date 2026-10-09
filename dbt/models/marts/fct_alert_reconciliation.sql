@@ -32,6 +32,8 @@ joined as (
         e.version_read,
         b.origin_checkin_event_id as batch_origin_checkin_event_id,
         b.rule_id as batch_rule_id,
+        b.nights_between as batch_nights_between,
+        e.nights_between as realtime_nights_between,
         e.origin_checkin_event_id as realtime_origin_checkin_event_id,
         e.rule_id as realtime_rule_id
     from keys as k
@@ -91,6 +93,9 @@ select
             then batch_rule_id = realtime_rule_id
             and batch_origin_checkin_event_id = realtime_origin_checkin_event_id
     end as same_attribution,
+    case
+        when status = 'matched' then batch_nights_between = realtime_nights_between
+    end as same_nights,
     case
         when status = 'matched' then epoch(received_time) - epoch(checkin_time) > 3600
     end as late_alert,

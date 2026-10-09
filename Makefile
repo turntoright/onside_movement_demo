@@ -5,10 +5,13 @@ PY := $(VENV)/bin/python
 DBT := $(VENV)/bin/dbt
 export REPO_ROOT
 
-ENV ?= sim
+ENV = sim
 SCALE ?= ci
 MODE ?= backfill
 N ?= 50
+# Optional pins for reproducible sim data (ISO 8601); passed only when set.
+ANCHOR ?=
+NOW ?=
 # standdown_checker lives under lambdas/; the editable install does not map it.
 GEN_PY := PYTHONPATH=$(REPO_ROOT)/lambdas $(PY)
 
@@ -36,7 +39,8 @@ setup:
 	$(GEN_PY) -m generator setup --env $(ENV) --scale $(SCALE)
 
 generate:
-	$(GEN_PY) -m generator generate --env $(ENV) --mode $(MODE) --n $(N)
+	$(GEN_PY) -m generator generate --env $(ENV) --mode $(MODE) --n $(N) \
+		$(if $(ANCHOR),--anchor $(ANCHOR)) $(if $(NOW),--now $(NOW))
 
 reset:
 	$(GEN_PY) -m generator reset --env $(ENV)
@@ -52,8 +56,8 @@ dbt-build:
 sim-data:
 	$(MAKE) reset ENV=sim
 	$(MAKE) setup ENV=sim SCALE=ci
-	$(MAKE) generate ENV=sim MODE=backfill
-	$(MAKE) generate ENV=sim MODE=live N=30
+	$(MAKE) generate ENV=sim MODE=backfill ANCHOR=$(ANCHOR)
+	$(MAKE) generate ENV=sim MODE=live N=30 NOW=$(NOW)
 
 sim-e2e: sim-data
 	$(MAKE) dbt-build ENV=sim

@@ -15,4 +15,4 @@ jobs:
       - run: make venv
       - run: make lint
       - run: make unit
-      - run: make sim-e2e
+      - run: make sim-e2e ANCHOR=2026-10-01T00:00:00+00:00 NOW=2026-10-09T04:00:00+00:00
