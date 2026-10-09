@@ -31,3 +31,13 @@ def test_project_dbt_is_dbt_core_with_duckdb_adapter():
         check=True,
     ).stdout
     assert "duckdb" in out.lower()
+
+
+def test_orchestration_pins_resolve_with_the_dbt_stack():
+    from importlib.metadata import version
+
+    assert version("dagster").startswith("1.13.")
+    assert version("dagster-webserver").startswith("1.13.")
+    assert version("dagster-dbt").startswith("0.29.")
+    assert version("dbt-core").startswith("1.12.")
+    assert version("dbt-duckdb").startswith("1.11.")

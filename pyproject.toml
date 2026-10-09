@@ -17,11 +17,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest~=9.1", "ruff~=0.16", "moto[s3,dynamodb,sqs,events]~=5.2"]
+# Dagster for ENV=local|aws (spec §6.4); also in dev so `make test` covers orchestration/.
+orchestration = ["dagster~=1.13.25", "dagster-webserver~=1.13.25", "dagster-dbt~=0.29.25"]
+dev = [
+  "pytest~=9.1",
+  "ruff~=0.16",
+  "moto[s3,dynamodb,sqs,events]~=5.2",
+  "onside-movement-demo[orchestration]",
+]
 
 [tool.setuptools.packages.find]
 where = [".", "lambdas"]
-include = ["generator*", "tracing*", "standdown_checker*", "archiver*"]
+include = ["generator*", "tracing*", "orchestration*", "standdown_checker*", "archiver*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
