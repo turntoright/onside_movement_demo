@@ -5,3 +5,13 @@ models:
     columns:
       - name: checkin_event_id
         data_tests: [unique, not_null]
+  - name: fct_movements
+    columns:
+      - name: dest_checkin_event_id
+        data_tests: [unique, not_null]
+      - name: gap_hours
+        data_tests: [not_null]
+  - name: fct_network_edges_monthly
+    columns:
+      - name: movements
+        data_tests: [not_null]
