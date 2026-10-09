@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import traceback
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,8 +32,8 @@ def _log(**fields) -> None:
     print(json.dumps(fields, sort_keys=True))
 
 
-def _send(events_client, bus_name: str, chunk: list[tuple[str, Outbound]]) -> set[str]:
-    """PutEvents for up to 10 entries; returns the message ids whose entries failed."""
+def _send(events_client, bus_name: str, chunk: list[tuple[str, Outbound]]) -> set[int]:
+    """PutEvents for up to 10 entries; returns the indexes (within chunk) of rejected entries."""
     entries = [
         {
             "Source": out.source,
@@ -45,14 +46,22 @@ def _send(events_client, bus_name: str, chunk: list[tuple[str, Outbound]]) -> se
     try:
         response = events_client.put_events(Entries=entries)
     except Exception as exc:  # noqa: BLE001 - any error fails the records, never the batch
-        _log(level="error", error=f"PutEvents: {type(exc).__name__}: {exc}")
-        return {message_id for message_id, _ in chunk}
+        _log(
+            level="error",
+            error=f"PutEvents: {type(exc).__name__}: {exc}",
+            traceback=traceback.format_exc(),
+        )
+        return set(range(len(chunk)))
     if not response.get("FailedEntryCount"):
         return set()
     results = response.get("Entries", [])
-    failed = {chunk[i][0] for i, result in enumerate(results) if result.get("ErrorCode")}
+    failed = {
+        i
+        for i, (_, result) in enumerate(zip(chunk, results, strict=False))
+        if result.get("ErrorCode")
+    }
     _log(level="error", error=f"PutEvents FailedEntryCount={response['FailedEntryCount']}")
-    return failed or {message_id for message_id, _ in chunk}
+    return failed or set(range(len(chunk)))
 
 
 def handle(
@@ -74,18 +83,25 @@ def handle(
                 envelope.get("detail-type"), envelope.get("detail"), store, rules, now
             )
         except Exception as exc:  # noqa: BLE001 - ValidationError, RetryExhaustedError, any
-            _log(level="error", messageId=message_id, error=f"{type(exc).__name__}: {exc}")
+            _log(
+                level="error",
+                messageId=message_id,
+                error=f"{type(exc).__name__}: {exc}",
+                traceback=traceback.format_exc(),
+            )
             failed.append(message_id)
             continue
         pending.extend((message_id, out) for out in outbound)
 
-    rejected: set[str] = set()
+    rejected: set[int] = set()  # indexes into pending
     for start in range(0, len(pending), PUT_EVENTS_MAX_ENTRIES):
-        rejected |= _send(events_client, bus_name, pending[start : start + PUT_EVENTS_MAX_ENTRIES])
-    for message_id, out in pending:
-        if out.detail_type == "HighRiskVisitDetected" and message_id not in rejected:
+        chunk = pending[start : start + PUT_EVENTS_MAX_ENTRIES]
+        rejected |= {start + i for i in _send(events_client, bus_name, chunk)}
+    for index, (_, out) in enumerate(pending):
+        if out.detail_type == "HighRiskVisitDetected" and index not in rejected:
             _log(level="alert", **out.detail)
-    failed.extend(m for m in dict.fromkeys(m for m, _ in pending) if m in rejected)
+    rejected_ids = {pending[i][0] for i in rejected}
+    failed.extend(m for m in dict.fromkeys(m for m, _ in pending) if m in rejected_ids)
     return {"batchItemFailures": [{"itemIdentifier": m} for m in failed]}
 
 

@@ -94,6 +94,10 @@ def test_invalid_records_fail_alone(store):
     result = call(batch, store, events)
     assert failures(result) == ["poison", "not-json", "unknown-property"]
     assert store.get_evaluation("A") is not None
+    assert events.details("CheckInEvaluated") == [
+        json.dumps(store.get_evaluation("A"), sort_keys=True, separators=(",", ":"))
+    ]
+    assert [e["DetailType"] for call in events.calls for e in call] == ["CheckInEvaluated"]
 
 
 def test_rejected_entry_fails_only_its_record_and_redelivery_reemits_identically(store):
@@ -130,7 +134,28 @@ def test_outbound_entries_are_sent_in_calls_of_at_most_ten(store):
     assert [len(c) for c in events.calls] == [10, 2]
 
 
+def test_rejected_entry_in_second_chunk_fails_only_that_record(store):
+    records = [
+        record(f"m{i}", "CheckIn", checkin(f"A{i}", "P1", A_IN["event_time"], person=f"U{i}"))
+        for i in range(12)
+    ]
+
+    class RejectNth(FakeEvents):
+        def put_events(self, Entries):
+            response = super().put_events(Entries)
+            if len(self.calls) == 2:
+                response["Entries"][1] = {"ErrorCode": "InternalFailure"}
+                response["FailedEntryCount"] = 1
+            return response
+
+    events = RejectNth()
+    assert failures(call(sqs_event(*records), store, events)) == ["m11"]
+
+
 def test_exhausted_retries_fail_the_record(store, monkeypatch):
+    real = H.process_event
+    monkeypatch.setattr(H, "process_event", lambda *a: real(*a, sleep=lambda seconds: None))
+
     def always_conflict(*args):
         raise ConflictError("busy")
 
