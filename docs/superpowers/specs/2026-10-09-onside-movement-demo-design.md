@@ -1,6 +1,6 @@
 # Onside movement demo — design
 
-Date: 2026-10-09. Revision 4: blocking issues from reviews 1–3 fixed (see §12).
+Date: 2026-10-09. Revision 5: blocking issues from reviews 1–4 fixed (see §12).
 
 ## 1. Purpose
 
@@ -75,7 +75,7 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
 | `lambdas/standdown_checker/processor.py` | Event processing over a `StateStore` interface (§6.1). Shared by the Lambda and the local simulator | rules |
 | `lambdas/standdown_checker/dynamo_store.py` | `StateStore` on DynamoDB: reads, plus TransactWriteItems commits | boto3 |
 | `lambdas/standdown_checker/handler.py` | SQS batch wrapper: partial batch failures, PutEvents with `FailedEntryCount` checked | processor |
-| `generator/local_sim.py` | `StateStore` in memory. Runs `processor` in received_time order for `--local-out` | processor |
+| `generator/local_sim.py` | `StateStore` in memory, persisted to `state/sim/sim_store.json` between runs. Runs `processor` in received_time order for `ENV=sim` | processor |
 | `shared/standdown_rules.csv` | The single source of rules: bundled into the Lambda zip and used as a dbt seed | — |
 | `shared/golden_cases.csv` | Pure-rule edge cases, run by both pytest and dbt (§6.3) | — |
 | `infra/terraform/` | All AWS resources; a variable switches between LocalStack endpoints and real AWS | — |
@@ -113,25 +113,32 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
     appear in the demo.
   - It updates the generator state.
 - **Event ids:** `event_id = uuid5(run_id, sequence)`, so runs never collide.
-- **Environments:**
-  - Every generator command takes `ENV=local|aws`.
-  - Generator state and manifests live under `state/<env>/`, and are mirrored to that
-    environment's S3 `control/manifests/`.
-  - Settling and the asset checks read only the current environment's manifests, so
-    LocalStack and AWS never mix.
+- **Environments:** every generator command takes `ENV=local|aws|sim`.
+  - **`local`** (LocalStack) and **`aws`:**
+    - Generator state and manifests live under `state/<env>/` and are mirrored to that
+      environment's S3 `control/manifests/`.
+    - Settling and the asset checks read only the current environment's manifests, so
+      LocalStack and AWS never mix.
+  - **`sim`:** makes no AWS calls (§3.3 Local output). Used by CI and for dbt
+    development.
+  - `make up` resets `state/local/`, because a LocalStack restart wipes its DynamoDB and
+    S3.
 - **Manifests:**
   - Each run writes `control/manifests/<run_id>.json` (mode, seed, distinct event_id
     counts per type) **before** emitting.
   - The checks sum the environment's manifests.
 - **Scale per environment:**
   - LocalStack: the default backfill.
-  - AWS: a small backfill (`N_CHECKINS=2000`) plus one live run, to keep DynamoDB
-    transactional write costs well under the budget.
+  - AWS: a small backfill that scales people and properties down with it (about 100
+    people, 40 properties, 3,000 check-ins) plus one live run. It still shows movements
+    and breaches, and keeps DynamoDB transactional write costs well under the budget.
+  - sim in CI: a small dataset (about 200 people, 5,000 check-ins).
 - **Clamping:** received_time is clamped to the run's end, so nothing is "received"
   in the future.
 
 ### 3.3 Generator guarantees (every run)
-- **Seed:** fixed, so output is reproducible.
+- **Seed:** fixed, so output is reproducible relative to the anchor time (the end of
+  the backfill).
 - **Default scale:** about 500 properties, 2,000 people, 100,000 check-ins.
   - At most 300 check-ins per person across all runs.
 - **Properties:** type (poultry, pork, beef, dairy, kiwifruit, vineyard, office, feed
@@ -151,35 +158,59 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
   movements or stand-down checks.
 - **Poison:** only valid events go on the normal path. `generate --poison K` sends K
   malformed events with `detail.poison = true`, recorded in
-  `control/manifests/poison_<run_id>.json`.
-- **Local output:** `--local-out DIR` writes **full EventBridge envelopes** (source,
-  detail-type, time, detail) as NDJSON, in the same layout as `compacted/`. It runs
-  `local_sim` in received_time order and writes its evaluation, applied and alert
-  envelopes too. dbt then reads local and S3 data with the same SQL.
+  `control/poison/<run_id>.json`.
+  - Their detail-type is CheckIn or CheckOut, so rule A routes them.
+  - A poison run does not settle; it never waits for S3.
+- **Local output (`ENV=sim`):** a complete third environment.
+  - No AWS calls.
+  - Generator state, manifests and the persisted sim store live in `state/sim/`.
+    Each run loads the store and saves it at the end, so versions continue across
+    backfill and live runs, as they do in DynamoDB.
+  - Each run writes **full EventBridge envelopes** (source, detail-type, time, detail)
+    for its generator events, plus the evaluation, applied and alert envelopes from
+    `local_sim`. They go to `data/sim/compacted/<run_id>/*.ndjson`, the same layout as
+    S3 `compacted/<env>/<run_id>/`.
+  - The dbt target `sim` globs `data/sim/compacted/*/*.ndjson`; targets `local` and
+    `aws` glob `s3://<bucket>/compacted/<env>/*/*.ndjson`. The SQL is otherwise the
+    same.
 
 ### 3.4 Settle and compact
 LocalStack's Firehose may write one small S3 object per event, and the backfill could
 produce hundreds of thousands of them. So nothing downstream reads `raw/` directly.
 
 `generator/settle.py` runs after emitting:
-1. **Scan incrementally.** List only arrival-hour prefixes from the run's start
-   onwards, and skip keys already parsed. A local key cache lives in `state/<env>/`.
-2. **Parse and count.** Parse each new object (concatenated JSON envelopes) and count
-   distinct event_ids per type.
+1. **Scan incrementally.**
+   - List only arrival-hour prefixes from one hour before the run's start onwards.
+     The extra hour absorbs clock skew.
+   - Skip keys already parsed. A local key cache lives in `state/<env>/`.
+2. **Parse, spool and count.**
+   - Parse each new object (concatenated JSON envelopes).
+   - Append its envelopes to a spool file `state/<env>/spool/<run_id>.ndjson`, so
+     nothing is held in memory.
+   - Count distinct event_ids per type.
 3. **Settled** when all of these hold:
    - every manifest event is present;
    - there is one CheckInEvaluated per distinct check-in and one CheckOutApplied per
      distinct check-out;
+   - there is one HighRiskVisitDetected per evaluation with `breach = true`;
    - the SQS queue shows 0 visible and 0 in-flight messages;
    - one more Firehose buffer (60 s) has passed, after which the scan is repeated.
-4. **Compact.** Write the run's parsed envelopes as a few NDJSON files under
-   `compacted/<env>/<run_id>/`. Write `control/settled/<run_id>.json`, then exit. On a
-   timeout, exit non-zero.
+4. **Compact.**
+   - Write the spool as a few NDJSON files under `compacted/<env>/<run_id>/`.
+   - Write `control/settled/<run_id>.json`, then exit.
+   - On a timeout, exit non-zero and keep the spool. `make settle RUN=… ENV=…` resumes
+     from the spool and the key cache.
+   - Duplicates across runs are harmless, because staging deduplicates over all of
+     `compacted/<env>/*/`.
 
-dbt reads only `compacted/`, which is a few files per run. **Day 1** measures the
-LocalStack object count and the settle time at 10,000 events. If a full backfill would
-take more than about 45 minutes, the LocalStack default scale drops to 30,000
-check-ins.
+dbt reads only `compacted/`, which is a few files per run.
+
+**Scale checks:**
+- **Day 1:** measure the Firehose object count and the parse throughput at 10,000
+  events, using a stub queue consumer.
+- **Day 4:** measure Lambda throughput on LocalStack.
+- If a full backfill would take more than about 45 minutes, the LocalStack default
+  scale drops to 30,000 check-ins.
 
 ### 3.5 Events (`detail` of each EventBridge event)
 
@@ -258,8 +289,7 @@ filter, each with the end and nights the Lambda used.
 - `stg_checkins`, `stg_checkouts`, `stg_plant_movements`, `stg_evaluations`,
   `stg_checkout_applied`, `stg_realtime_alerts`.
 - **Reading:**
-  - Read `compacted/<env>/*/*.ndjson`, or the `--local-out` directory, chosen by the
-    target. Use `read_json(glob, format='newline_delimited', columns={...})`, declaring
+  - Read the target's glob (§3.3 Local output). Use `read_json(glob, format='newline_delimited', columns={...})`, declaring
     `detail` as JSON (no schema inference).
   - Then extract the fields per detail-type.
   - Only `settle.py` reads the concatenated `raw/` objects.
@@ -434,7 +464,9 @@ matter.
     owner_company_id, checkin_time, checkout_time, expected_breach, expected_rule_id,
     expected_origin_visit_id.
   - A staging model splits the seed into the visits and properties relations that the
-    `standdown` macro expects, keyed by (case_id, property_id).
+    `standdown` macro expects.
+    - It sets `person_id = case_id` and `property_id = case_id || ':' || property_id`.
+    - So the macro needs no knowledge of cases.
   - Cases include a same-property origin, which must be excluded.
   - Cases: daylight saving, an intervening visit, most-specific scope, the pick order,
     the window edge, clipping at 0, no matching rule.
@@ -453,8 +485,8 @@ matter.
 - **Asset checks:**
   - **Completeness:** distinct event_ids per type in `compacted/<env>/` equal the
     environment's summed manifests, for CheckIn, CheckOut and PlantMovement.
-  - **DLQ:** `ApproximateNumberOfMessages` equals the summed poison manifests. Read
-    the attribute only; never receive messages.
+  - **DLQ:** `ApproximateNumberOfMessages` equals the summed `control/poison/`
+    manifests. Read the attribute only; never receive messages.
   - **Freshness:** after a live run, the latest received_time is within 15 minutes of
     the settle time. Skipped for backfill.
 
@@ -482,19 +514,20 @@ matter.
      - a transaction conflict and retry;
      - partial batch failure;
      - `FailedEntryCount` treated as a failure.
-2. **dbt:** the tests in §6.3. The CI target reads `--local-out` files, including the
-   simulator's evaluations, so reconciliation runs in CI too.
-3. **Integration:** the full chain on LocalStack. Send a small fixed set including
+2. **dbt:** the tests in §6.3. CI generates `ENV=sim` data (a backfill and one live
+   run), including the simulator's evaluations, so reconciliation runs in CI too.
+3. **Integration:** the full chain on a **fresh** LocalStack stack, before the demo
+   backfill, so its orphan, duplicate and poison cases never mix with demo data. Send a small fixed set including
    out-of-order, duplicate, orphan check-out and poison cases. Wait for settling. Then
    assert person_state, evaluations, the S3 objects and the DLQ count.
-4. **Parity:** over the full generated dataset, on both `--local-out` and LocalStack:
+4. **Parity:** over the full generated dataset, on both `sim` and LocalStack:
    `false_alert`, `not_evaluated` and `unexplained` = 0.
 
 ## 8. CI/CD and deployment
 
 - **GitHub Actions:**
   - ruff, pytest, `terraform fmt -check` and `validate`, and `dbt build` on a small
-    `--local-out` dataset.
+    `ENV=sim` dataset.
   - A separate LocalStack integration job, with a token from repository secrets if
     needed.
 - **Makefile:** `up`, `deploy ENV=local|aws`, `setup`,
@@ -508,7 +541,7 @@ matter.
 - **LocalStack:** since release 2026.03.0, the single image needs
   `LOCALSTACK_AUTH_TOKEN`. Day 1 decides between the free hobby token and pinning a
   pre-2026.03 4.x tag.
-  - Fallback if neither works: `--local-out` with `local_sim` covers everything except
+  - Fallback if neither works: `ENV=sim` covers everything except
     the AWS wiring. That is a reduced demo; the full chain is then shown only on real
     AWS.
 
@@ -535,8 +568,8 @@ Before the demo, `make generate MODE=backfill` has settled and Dagster has run o
 | Day | Work |
 |---|---|
 | D1 | Repo; LocalStack decision; Firehose → S3 check and scale measurement at 10k events; generator; `rules.py` with golden cases |
-| D2 | `processor.py` + `local_sim` (TDD), so `--local-out` produces evaluations; start Terraform |
-| D3 | dbt models and tests on `--local-out` data, including reconciliation; trace algorithm (pure Python) |
+| D2 | `processor.py` + `local_sim` (TDD), so `ENV=sim` produces evaluations; start Terraform |
+| D3 | dbt models and tests on `sim` data, including reconciliation; trace algorithm (pure Python) |
 | D4 | Terraform finished, DynamoDB store, handler, settle & compact, LocalStack integration; **full backfill in the evening** |
 | D5 | Dagster (sensor, checks, trace job), CI, real AWS deploy, README, rehearsal |
 
@@ -591,11 +624,11 @@ D5 is tight. The cut line protects it.
 | # | Issue | Fix |
 |---|---|---|
 | B-1 | A placeholder was taken for a duplicate CheckIn | §6.1 step 3: duplicate means "an evaluation exists" |
-| B-2 | The Firehose input transformer dropped `detail` | §6.5: no transformer; `format='unstructured'` |
+| B-2 | The Firehose input transformer dropped `detail` | §6.5: no transformer (superseded in revision 4: only `settle.py` reads raw; dbt reads NDJSON) |
 | B-3 | Trimming broke redelivery and dedupe | §6.1: no trimming; separate `evaluations` table; transactional commit |
 | B-4 | Loose miss classes; `origins_seen` undefined | §4 bound; §6.2 version proofs; CheckOutApplied |
 | B-5 | Evaluations arrive after check-ins | §3.4 settling; sensor on `control/settled/` |
-| B-6 | `--local-out` had no evaluations | `local_sim` sharing `processor.py` |
+| B-6 | `--local-out` had no evaluations | `local_sim` sharing `processor.py` (`ENV=sim` since revision 5) |
 | B-7 | Poison events reached S3 and staging | Event pattern exclusion plus a staging filter |
 | B-8 | Live mode's relation to backfill undefined | §3.2: continuation, uuid5 ids, per-run manifests |
 | B-9 | Witness path and hop count could disagree | §5: per-layer predecessors |
@@ -625,3 +658,19 @@ tracing algorithm are sound.
 | 4 | LocalStack Firehose writes too many tiny objects | §3.4: incremental settle plus compaction; dbt reads `compacted/`; Day 1 measurement |
 
 All non-blocking items N1–N9 from review 3 were also adopted.
+
+**Review 4: 1 blocking issue, fixed in revision 5.** The `--local-out` path had no
+persisted state, environment or manifest lifecycle, so versions restarted on live
+runs. Fix: `ENV=sim` as a full third environment with a persisted sim store
+(§3.2, §3.3). Non-blocking N1–N12 were also adopted:
+- alerts are counted in settle;
+- spool plus `make settle` for recovery;
+- `control/poison/`;
+- an exact glob per target;
+- integration on a fresh stack;
+- `make up` resets `state/local/`;
+- AWS scale with people and properties scaled down too;
+- Day 1 and Day 4 scale checks;
+- golden-case ids;
+- a one-hour skew margin on listing;
+- reproducibility relative to the anchor time.
