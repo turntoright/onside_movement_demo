@@ -1,5 +1,13 @@
 # Plan 2 — AWS wiring on LocalStack Implementation Plan
 
+> **Executed (2026-10-10).** This plan was executed on `feat/plan-2-aws-wiring` with the
+> amendments from its plan review and the final review; the rulings, the deviations and the
+> Plan 3 preconditions are in `docs/superpowers/plans/2026-10-10-plan-2-execution-notes.md`,
+> which wins where it and this plan differ. In particular: Terraform requires `>= 1.9` (the
+> code blocks below still say 1.6), the stack has **26 resources** (the plan review added the
+> TLS-only bucket policy; the "25 resources" in the dry run and in Tasks 10–12 read 26), and
+> the spec is now revision 7.2.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Run the whole Onside event chain on LocalStack with the same Terraform that will
@@ -20,12 +28,12 @@ deploy to AWS: generator → EventBridge → SQS → stand-down Lambda (DynamoDB
 
 **Tech Stack:**
 - Python 3.12, boto3 (runtime-provided in Lambda), moto 5.2 for unit tests
-- Terraform ≥ 1.6 (dry run: 1.15.8) with hashicorp/aws `~> 6.0` and hashicorp/archive `~> 2.4`
+- Terraform ≥ 1.9 (dry run: 1.15.8) with hashicorp/aws `~> 6.0` and hashicorp/archive `~> 2.4`
 - LocalStack `4.14.0` community (no token), Docker Compose v2
 - DuckDB 1.5 + dbt-duckdb 1.11 (`httpfs`, `aws` extensions)
 - pytest 9, ruff 0.16
 
-**Spec:** `docs/superpowers/specs/2026-10-09-onside-movement-demo-design.md` (revision 7.1).
+**Spec:** `docs/superpowers/specs/2026-10-09-onside-movement-demo-design.md` (revision 7.2).
 **Design brief (binding decisions):** `docs/superpowers/plans/2026-10-10-plan-2-design-brief.md`.
 Also read: `docs/superpowers/plans/2026-10-09-plan-1-execution-notes.md` (rulings),
 `docs/spikes/2026-10-plan2-localstack.md` (measured LocalStack behaviour). Authority:
