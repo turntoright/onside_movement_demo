@@ -42,9 +42,13 @@ class InMemoryStore:
     ) -> None:
         if evaluation is not None and evaluation["checkin_event_id"] in self.evaluations:
             raise EvaluationExistsError(evaluation["checkin_event_id"])
-        current = self.persons.get(person_id, {"version": 0})["version"]
-        if current != version_read:
-            raise ConflictError(f"{person_id}: read {version_read}, now {current}")
+        existing = self.persons.get(person_id)
+        if version_read == 0:
+            if existing is not None:
+                raise ConflictError(f"{person_id}: read as absent, now {existing['version']}")
+        elif existing is None or existing["version"] != version_read:
+            now = "absent" if existing is None else existing["version"]
+            raise ConflictError(f"{person_id}: read {version_read}, now {now}")
         self.persons[person_id] = {"version": version_read + 1, "visits": copy.deepcopy(visits)}
         if evaluation is not None:
             self.evaluations[evaluation["checkin_event_id"]] = copy.deepcopy(evaluation)
@@ -106,7 +110,8 @@ def run_sim(emissions, store, rules, out_dir: Path) -> dict[str, int]:
             for j, out in enumerate(outbound):
                 counts[out.detail_type] = counts.get(out.detail_type, 0) + 1
                 env = envelope(
-                    out.source, out.detail_type, out.detail["processed_at"], out.detail,
+                    out.source, out.detail_type, out.detail["processed_at"],
+                    json.loads(out.detail_json()),
                     f"{out.detail['event_id']}#{i}.{j}",
                 )  # fmt: skip
                 derived.write(json.dumps(env, sort_keys=True) + "\n")

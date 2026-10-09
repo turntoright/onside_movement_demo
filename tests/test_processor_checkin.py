@@ -11,13 +11,14 @@ def new_store() -> InMemoryStore:
 
 def test_first_checkin_commits_version_one_without_breach():
     store = new_store()
-    out = run(store, "CheckIn", checkin("A", "P1", "2026-03-03T09:00:00+13:00"))
+    detail = checkin("A", "P1", "2026-03-03T09:00:00+13:00", received="2026-03-03T09:05:00+13:00")
+    out = run(store, "CheckIn", detail)
     assert types(out) == ["CheckInEvaluated"]
     evaluation = out[0].detail
     assert evaluation["event_id"] == derived_id("eval", "A")
     assert (evaluation["version_read"], evaluation["version_committed"]) == (0, 1)
     assert evaluation["breach"] is False
-    assert evaluation["detected_time"] == "2026-03-03T09:00:00+13:00"
+    assert evaluation["detected_time"] == "2026-03-03T09:05:00+13:00"  # received, not event time
     assert store.load_person("U1")[0] == 1
 
 

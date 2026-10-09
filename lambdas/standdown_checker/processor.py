@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import random
 import time
 from collections.abc import Callable, Sequence
@@ -16,11 +17,19 @@ from .store import ConflictError, EvaluationExistsError, StateStore
 MAX_CONFLICT_RETRIES = 3
 
 
+def serialize_detail(detail: dict) -> str:
+    """The one canonical JSON form for every event the processor emits."""
+    return json.dumps(detail, sort_keys=True, separators=(",", ":"))
+
+
 @dataclass(frozen=True)
 class Outbound:
     detail_type: str
     detail: dict
     source: str = STANDDOWN_SOURCE
+
+    def detail_json(self) -> str:
+        return serialize_detail(self.detail)
 
 
 class RetryExhaustedError(Exception):
