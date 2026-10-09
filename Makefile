@@ -169,16 +169,31 @@ infra-env:
 	@if [ "$(origin ENV)" != "command line" ] || { [ "$(ENV)" != local ] && [ "$(ENV)" != aws ]; }; then \
 		echo "error: this target needs ENV=local or ENV=aws on the command line" >&2; exit 2; fi
 
+# ENV=aws: the saved plan that `make deploy` shows, confirms and then applies.
+TF_PLAN = $(TF_DIR)/state/aws.tfplan
+
+# ENV=local applies without asking. ENV=aws shows the plan and asks before applying it
+# (applying a saved plan never prompts, so the confirmation is ours).
 deploy: infra-env package
 	mkdir -p $(REPO_ROOT)/infra/terraform/state $(REPO_ROOT)/state/$(ENV)
 	@$(TF_INIT)
+ifeq ($(ENV),aws)
+	$(TF) plan -input=false -out=$(TF_PLAN) $(TF_VARS)
+	@read -r -p "Apply this plan to account $(AWS_ACCOUNT_ID)? [y/N] " answer; \
+		if [ "$$answer" != y ] && [ "$$answer" != Y ]; then \
+			rm -f $(TF_PLAN); echo "deploy cancelled; nothing applied" >&2; exit 1; fi
+	$(TF) apply -input=false $(TF_PLAN)
+	rm -f $(TF_PLAN)
+else
 	$(TF) apply -input=false -auto-approve $(TF_VARS)
+endif
 	$(TF) output -json > $(REPO_ROOT)/state/$(ENV)/outputs.json.tmp
 	mv $(REPO_ROOT)/state/$(ENV)/outputs.json.tmp $(REPO_ROOT)/state/$(ENV)/outputs.json
 
+# ENV=aws: Terraform shows the destroy plan and asks for "yes".
 destroy: infra-env package
 	@$(TF_INIT)
-	$(TF) destroy -input=false -auto-approve $(TF_VARS)
+	$(TF) destroy $(if $(filter local,$(ENV)),-input=false -auto-approve) $(TF_VARS)
 	$(if $(filter aws,$(ENV)),rm -rf $(REPO_ROOT)/state/aws)
 
 # Its own data directory without a backend, so it never touches an environment's init.
