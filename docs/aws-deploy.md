@@ -12,8 +12,9 @@ other than `AWS_ACCOUNT_ID`.
 ## Prerequisites
 
 - IAM permissions: admin-equivalent for the deploy (it creates IAM roles, Lambdas, queues,
-  tables, a bucket and an EventBridge bus), plus `budgets:ModifyBudget` and
-  `budgets:ViewBudget` for the budget in step 3.
+  tables, a bucket and an EventBridge bus), plus `budgets:ModifyBudget`,
+  `budgets:ViewBudget`, `budgets:TagResource` and `budgets:ListTagsForResource` for the
+  budget in step 3 (its provider tags it with `project` and `env`).
 - An IAM user (not the root user) needs Billing console access activated for the account to
   take the `aws-01-budget` screenshot.
 - The 100% FORECASTED budget alert cannot fire on a new account until AWS has enough usage

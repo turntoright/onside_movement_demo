@@ -53,6 +53,7 @@ flowchart LR
 
 **LocalStack (the full demo):** LocalStack 4.14.0 community, no token.
 
+    make venv                               # once: the project venv (skip it if done above)
     make integration                        # the spec §7.3 test on a fresh stack; it WIPES the
                                             # current stack and backfill, so run it first (about 5 min)
     make up                                 # a fresh, empty LocalStack; also wipes state/local,
@@ -84,6 +85,10 @@ stall waiting for that slot: Runs → the old `STARTED` run → Terminate (force
 slot frees within a minute (or Deployment → Concurrency → `duckdb` → "Free all concurrency
 slots for run").
 
+LocalStack keeps nothing across a Docker or laptop restart. On the day, check
+`make alerts ENV=local` first; if it fails with a hint to run `make up`, the stack is gone:
+rerun the quick start from `make up` (about 30 min).
+
 1. **The story (30 s).** This README's table and diagram.
 2. **Live events (1 min).**
 
@@ -111,8 +116,8 @@ slots for run").
    origin check-in arrived first but was processed later (`origin_not_seen`, `reordered`).
    Each has version evidence. That is why the warehouse recomputes on event time." After the
    backfill the output was 40 `offline`, 4 `origin_end_not_seen` and no `reordered` row. Run
-   the query between Dagster runs: DuckDB allows one writing process, and Dagster holds the
-   file only while a run is in the `duckdb` pool.
+   it between Dagster runs: while a dbt run writes the file, DuckDB lets no other process
+   open it.
 5. **Tracing and key properties (1 min).**
 
         make trace ENV=local PROPERTY=P0172 START=2026-06-01T00:00:00+12:00
@@ -126,11 +131,12 @@ slots for run").
 6. **Production next steps (30 s).** The list below.
 
 Dead-letter queue, last: `make poison ENV=local K=2` sends malformed events, which reached the
-visit DLQ 3 min 02 s later (offline rehearsal); the next `dbt_build` run's
-`dead_letter_queues` check then reports 2 poison messages and passes. The poison records are
-written first, so a `dbt_build` run in those 3 minutes has a red DLQ check: run poison after
-the other steps. DLQ messages expire after 14 days while the poison records stay, so rebuild
-the state if the last poison is older than that.
+visit DLQ 3 min 02 s later (offline rehearsal). Poison settles nothing, so the sensor starts
+no run: after those 3 minutes run the checks yourself (Dagster UI: `stg_events` → Checks →
+Execute all, or launch `dbt_build`). The `dead_letter_queues` check then reports 2 poison
+messages and passes. The poison records are written first, so a check run in those
+3 minutes is red: run poison after the other steps. DLQ messages expire after 14 days while
+the poison records stay, so rebuild the state if the last poison is older than that.
 
 ## Results
 
@@ -148,7 +154,7 @@ Measured on a 4-CPU laptop with LocalStack, at the `local` scale (200 properties
 
 ## Testing
 
-- **Unit (`make test`):** 278 pytest tests pass (the integration test is skipped without
+- **Unit (`make test`):** 292 pytest tests pass (the integration test is skipped without
   LocalStack), with moto standing in for AWS. They cover the stand-down rules over the golden
   cases, the processor, both Lambdas, settle, the generator CLI, tracing, the Dagster sensor,
   checks, trace job and definitions, and the Makefile wiring. No Docker needed.
