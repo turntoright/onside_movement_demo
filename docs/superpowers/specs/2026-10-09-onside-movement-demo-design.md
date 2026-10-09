@@ -1,7 +1,8 @@
 # Onside movement demo — design
 
 Date: 2026-10-09. Revision 7 (2026-10-10): the Firehose path is replaced by an archiver
-Lambda after the Plan 2 spike; see §12 "Revision 7". Revision 6.1 had passed review 6
+Lambda after the Plan 2 spike; see §12 "Revision 7". Revision 7.2 (2026-10-10): real-AWS
+hardening from the Plan 2 plan review (§6.5, §12). Revision 6.1 had passed review 6
 with no blocking issues.
 
 ## 1. Purpose
@@ -548,7 +549,11 @@ matter.
   EventBridge envelope, including `detail`, is archived.
 - The archiver event source mapping uses batch size 100 with
   `maximum_batching_window_in_seconds = 5` (AWS rejects batch > 10 without a window).
-  Archiver timeout 25 s; archive-queue visibility timeout 30 s (≥ the function timeout).
+  Archiver timeout 25 s; archive-queue visibility timeout 60 s (it must cover the batching
+  window plus the function timeout).
+- Both event source mappings cap concurrency (`maximum_concurrency` 5 for the stand-down
+  Lambda, 2 for the archiver), so throttling on a low-quota AWS account cannot use up
+  receives and dead-letter valid messages.
 - The archiver writes the batch as one NDJSON object
   `raw/<YYYY>/<MM>/<DD>/<HH>/<uuid>.ndjson`: one compact JSON envelope per line, keyed by
   the archiver's own UTC wall clock when it runs (never the envelope's `time`).
@@ -790,3 +795,10 @@ Non-blocking items also adopted:
   poison timing of 3 minutes; the archiver's wall-clock key and compact lines; the
   archiver added to the schedule and tests. The Plan 2 dry run must prove the archiver
   on LocalStack (S3 write through the injected endpoint, batch > 10 with a window).
+
+**Revision 7.2 (2026-10-10, Plan 2 plan review).** No blocking issues. Real-AWS hardening:
+archive-queue visibility 30 s → 60 s and `maximum_concurrency` on both event source
+mappings (§6.5); Terraform refuses `env=local` without a LocalStack endpoint, so a local
+deploy can never reach the real account; LocalStack is published on 127.0.0.1 only; the
+offline demo no longer needs the network (`make up` pulls the Lambda image only when it
+is missing, and packaging copies tzdata from the venv).
