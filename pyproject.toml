@@ -18,11 +18,18 @@ dependencies = [
 
 [project.optional-dependencies]
 # Dagster for ENV=local|aws (spec §6.4); also in dev so `make test` covers orchestration/.
-orchestration = ["dagster~=1.13.25", "dagster-webserver~=1.13.25", "dagster-dbt~=0.29.25"]
+# dagster-graphql: orchestration/trace_job.py imports it (it also comes with the webserver).
+orchestration = [
+  "dagster~=1.13.25",
+  "dagster-webserver~=1.13.25",
+  "dagster-dbt~=0.29.25",
+  "dagster-graphql~=1.13.25",
+]
 dev = [
   "pytest~=9.1",
   "ruff~=0.16",
   "moto[s3,dynamodb,sqs,events]~=5.2",
+  "pyyaml>=6", # tests read YAML directly
   "onside-movement-demo[orchestration]",
 ]
 

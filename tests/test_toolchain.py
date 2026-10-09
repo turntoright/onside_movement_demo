@@ -1,6 +1,7 @@
 """Checks that the local toolchain can do what the design relies on."""
 
 import subprocess
+import tomllib
 from datetime import date
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -41,3 +42,17 @@ def test_orchestration_pins_resolve_with_the_dbt_stack():
     assert version("dagster-dbt").startswith("0.29.")
     assert version("dbt-core").startswith("1.12.")
     assert version("dbt-duckdb").startswith("1.11.")
+
+
+def test_packages_imported_directly_are_declared_not_transitive():
+    extras = tomllib.loads((REPO / "pyproject.toml").read_text())["project"][
+        "optional-dependencies"
+    ]
+    assert "dagster-graphql~=1.13.25" in extras["orchestration"]  # orchestration/trace_job.py
+    assert "pyyaml>=6" in extras["dev"]  # tests that read YAML
+
+
+def test_dagster_graphql_matches_dagster():
+    from importlib.metadata import version
+
+    assert version("dagster-graphql") == version("dagster")
