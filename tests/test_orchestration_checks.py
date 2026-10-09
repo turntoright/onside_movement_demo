@@ -87,6 +87,8 @@ def test_completeness_fails_when_a_settled_event_is_missing(aws, deployed, onsid
     assert not result.passed
     meta = {k: v.value for k, v in result.metadata.items()}
     assert (meta["CheckIn expected"], meta["CheckIn found"]) == (3, 2)
+    assert result.description.startswith("found/expected: CheckIn 2/3, CheckOut 2/2, ")
+    assert "PlantMovement 1/1" in result.description
 
 
 def test_completeness_with_no_settled_run_passes_and_counts_nothing(aws, deployed, onside):
@@ -112,18 +114,18 @@ def test_completeness_ignores_a_staged_event_that_belongs_to_no_settled_run(aws,
 
 
 @pytest.mark.parametrize(
-    ("poison", "visit", "archive", "passed"),
+    ("poison", "visit", "archive", "passed", "why"),
     [
-        (0, 0, 0, True),
-        (2, 2, 0, True),
-        (2, 4, 0, True),
-        (2, 1, 0, False),
-        (2, 5, 0, False),
-        (0, 0, 1, False),
+        (0, 0, 0, True, None),
+        (2, 2, 0, True, None),
+        (2, 4, 0, True, None),
+        (2, 1, 0, False, "visit DLQ 1 < P=2"),
+        (2, 5, 0, False, "visit DLQ 5 > 2P=4"),
+        (0, 0, 1, False, "archive DLQ 1 > 0"),
     ],
 )
 def test_dlq_check_bounds_the_visit_dlq_and_wants_an_empty_archive_dlq(
-    aws, deployed, onside, poison, visit, archive, passed
+    aws, deployed, onside, poison, visit, archive, passed, why
 ):
     if poison:
         put(aws, "control/poison/p1.json", {"run_id": "p1", "k": poison})
@@ -133,6 +135,7 @@ def test_dlq_check_bounds_the_visit_dlq_and_wants_an_empty_archive_dlq(
         aws.sqs.send_message(QueueUrl=aws.queue_urls["archive_dlq"], MessageBody="{}")
     result = dead_letter_queues(onside=onside)
     assert result.passed is passed
+    assert result.description == why
     # attributes only: nothing was received, so every message is still visible
     assert Q.visible(aws.sqs, aws.queue_urls["visit_dlq"]) == visit
 
@@ -144,6 +147,13 @@ def test_freshness_is_skipped_after_a_backfill(aws, deployed, onside):
     assert result.metadata["skipped"].value == "backfill"
 
 
+def test_freshness_reports_the_actual_mode_it_skips(aws, deployed, onside):
+    add_run(aws, deployed, mode="replay")
+    result = freshness(onside=onside)
+    assert result.passed
+    assert result.metadata["skipped"].value == "replay"
+
+
 def test_freshness_is_skipped_when_no_run_has_settled(aws, deployed, onside):
     add_run(aws, deployed, mode="live", settled=False)
     result = freshness(onside=onside)
@@ -152,17 +162,25 @@ def test_freshness_is_skipped_when_no_run_has_settled(aws, deployed, onside):
 
 
 @pytest.mark.parametrize(
-    ("lag", "passed"), [(timedelta(minutes=5), True), (timedelta(minutes=20), False)]
+    ("lag", "passed", "why"),
+    [
+        (timedelta(minutes=5), True, None),
+        (timedelta(minutes=15), True, None),  # the bound is inclusive
+        (timedelta(minutes=20), False, "lag 20.0 min > 15 min"),
+    ],
 )
-def test_freshness_of_the_latest_live_run(aws, deployed, onside, lag, passed):
+def test_freshness_of_the_latest_live_run(aws, deployed, onside, lag, passed, why):
     add_run(aws, deployed, mode="backfill", received=T0 - timedelta(days=1))
     add_run(aws, deployed, mode="live", received=T0, settled_at=T0 + lag)
     result = freshness(onside=onside)
     assert result.passed is passed
     assert result.metadata["lag minutes"].value == lag.total_seconds() / 60
+    assert (result.description or "").startswith(why or "")
+    assert (result.description is None) is passed
 
 
 def test_freshness_fails_when_the_live_run_is_not_in_the_warehouse(aws, deployed, onside):
-    add_run(aws, deployed, mode="live", load=False)
+    run_id = add_run(aws, deployed, mode="live", load=False)
     result = freshness(onside=onside)
     assert not result.passed
+    assert result.description.startswith(f"no event of run {run_id} in stg_events")

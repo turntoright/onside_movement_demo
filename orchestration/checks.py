@@ -56,8 +56,9 @@ def run_ids(run_id: str, total: int) -> set[str]:
     asset=STG_EVENTS,
     name="completeness",
     pool=POOL,
-    description="Distinct app event_ids per type in the warehouse (stg_events reads "
-    "compacted/<env>/) equal the summed manifests of the settled runs.",
+    description="Every app event_id of the settled runs' manifests is in stg_events (reads "
+    "compacted/<env>/; counts per type shown); staged events of unsettled runs or of no "
+    "manifest are ignored.",
 )
 def completeness(onside: OnsideResource) -> AssetCheckResult:
     conn = onside.connection()
@@ -75,7 +76,15 @@ def completeness(onside: OnsideResource) -> AssetCheckResult:
         metadata[f"{t} expected"] = expected[t]
         metadata[f"{t} found"] = len(found[t])
     passed = all(len(found[t]) == expected[t] for t in APP_TYPES)
-    return AssetCheckResult(passed=passed, metadata=metadata)
+    # A transient red: a run that settles between this run's stg_events build and this check
+    # counts as settled, but its events are not staged yet. Its own sensor run turns it green.
+    why = None
+    if not passed:
+        why = "found/expected: " + ", ".join(
+            f"{t} {len(found[t])}/{expected[t]}" for t in APP_TYPES
+        )
+        why += " (a run settled after this build? its own dbt_build re-checks)"
+    return AssetCheckResult(passed=passed, metadata=metadata, description=why)
 
 
 @asset_check(
@@ -89,10 +98,17 @@ def dead_letter_queues(onside: OnsideResource) -> AssetCheckResult:
     poison = sum(int(r.get("k", 0)) for r in control_records(conn, "control/poison/").values())
     visit = Q.visible(conn.sqs, conn.outputs.visit_dlq_url)
     archive = Q.visible(conn.sqs, conn.outputs.archive_dlq_url)
-    passed = poison <= visit <= 2 * poison and archive == 0
+    failures = []
+    if visit < poison:
+        failures.append(f"visit DLQ {visit} < P={poison}")
+    if visit > 2 * poison:
+        failures.append(f"visit DLQ {visit} > 2P={2 * poison}")
+    if archive:
+        failures.append(f"archive DLQ {archive} > 0")
     return AssetCheckResult(
-        passed=passed,
+        passed=not failures,
         metadata={"poison injected": poison, "visit DLQ": visit, "archive DLQ": archive},
+        description="; ".join(failures) or None,
     )
 
 
@@ -101,7 +117,7 @@ def dead_letter_queues(onside: OnsideResource) -> AssetCheckResult:
     name="freshness",
     pool=POOL,
     description="After a live run, its latest received_time in the warehouse is within "
-    "15 minutes of its settle time. Skipped for a backfill.",
+    "15 minutes of its settle time. Skipped when the latest settled run is not live.",
 )
 def freshness(onside: OnsideResource) -> AssetCheckResult:
     settled = control_records(onside.connection(), SETTLED_PREFIX)
@@ -112,25 +128,34 @@ def freshness(onside: OnsideResource) -> AssetCheckResult:
     )
     run_id = latest["run_id"]
     if latest["mode"] != "live":
-        return AssetCheckResult(passed=True, metadata={"skipped": "backfill", "run_id": run_id})
+        return AssetCheckResult(passed=True, metadata={"skipped": latest["mode"], "run_id": run_id})
     ids = run_ids(run_id, sum(latest["counts"].values()))
     received = [
         datetime.fromisoformat(rt)
         for _, eid, rt in app_events(onside.warehouse())
         if eid in ids and rt
     ]
+    # A transient red: a live run that settles between this run's stg_events build and this
+    # check becomes the latest, but its events are not staged yet. Its own sensor run turns
+    # it green.
     if not received:
         return AssetCheckResult(
-            passed=False, metadata={"run_id": run_id, "error": "no event of this run in stg_events"}
+            passed=False,
+            metadata={"run_id": run_id, "error": "no event of this run in stg_events"},
+            description=f"no event of run {run_id} in stg_events "
+            "(settled after this build? its own dbt_build re-checks)",
         )
     settled_at = datetime.fromisoformat(latest["settled_at"])
     lag = settled_at - max(received)
+    minutes = round(lag.total_seconds() / 60, 1)
+    passed = lag <= FRESHNESS
     return AssetCheckResult(
-        passed=lag <= FRESHNESS,
+        passed=passed,
+        description=None if passed else f"lag {minutes} min > {FRESHNESS.seconds // 60} min",
         metadata={
             "run_id": run_id,
             "settled_at": latest["settled_at"],
             "max received_time": max(received).isoformat(),
-            "lag minutes": round(lag.total_seconds() / 60, 1),
+            "lag minutes": minutes,
         },
     )
