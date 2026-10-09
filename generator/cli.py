@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import random
 import shutil
 import sys
@@ -208,6 +209,40 @@ def cmd_settle(args: argparse.Namespace) -> int:
     return 0
 
 
+CHECKER_LOG_GROUP = "/aws/lambda/onside-standdown-checker"
+
+
+def cmd_alerts(args: argparse.Namespace) -> int:
+    """Count the stand-down alerts in the checker Lambda's logs (spec §9 step 2)."""
+    if args.env == "sim":
+        raise S.GeneratorError("alerts needs ENV=local or ENV=aws (it reads Lambda logs)")
+    logs = A.client(args.env, "logs")
+    lines = 0
+    distinct: set[str] = set()
+    token = None
+    while True:
+        kwargs = {"logGroupName": CHECKER_LOG_GROUP, "filterPattern": '{ $.level = "alert" }'}
+        if token:
+            kwargs["nextToken"] = token
+        page = logs.filter_log_events(**kwargs)
+        for event in page.get("events", []):
+            try:  # LocalStack ignores filterPattern, so always filter here
+                record = json.loads(event["message"])
+            except ValueError:
+                continue
+            if isinstance(record, dict) and record.get("level") == "alert":
+                lines += 1
+                distinct.add(str(record.get("checkin_event_id")))
+        token = page.get("nextToken")
+        if not token:
+            break
+    print(
+        f"{lines} alert log lines, {len(distinct)} distinct alerts "
+        "(by checkin_event_id; redeliveries log twice)"
+    )
+    return 0
+
+
 def cmd_poison(args: argparse.Namespace) -> int:
     if args.env == "sim":
         raise S.GeneratorError("poison needs ENV=local or ENV=aws (it demonstrates the DLQ)")
@@ -251,6 +286,7 @@ COMMANDS = {
     "generate": cmd_generate,
     "settle": cmd_settle,
     "poison": cmd_poison,
+    "alerts": cmd_alerts,
     "reset": cmd_reset,
 }
 
@@ -278,6 +314,8 @@ def main(argv: list[str] | None = None) -> int:
     p_poison.add_argument("--env", choices=ENVS, required=True)
     p_poison.add_argument("--k", type=int, default=3)
     p_poison.add_argument("--timeout", type=float, default=POISON_TIMEOUT_SECONDS)
+    p_alerts = sub.add_parser("alerts")
+    p_alerts.add_argument("--env", choices=ENVS, required=True)
     p_reset = sub.add_parser("reset")
     p_reset.add_argument("--env", choices=ENVS, required=True)
     args = parser.parse_args(argv)

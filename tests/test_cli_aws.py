@@ -247,3 +247,45 @@ def test_failed_poison_emit_points_to_the_recovery(aws, repo, monkeypatch, capsy
     err = capsys.readouterr().err
     assert "PutEvents rejected" in err
     assert "make up" in err
+
+
+def test_alerts_counts_json_alert_lines_across_pages(monkeypatch, capsys):
+    def alert(checkin_id):
+        return json.dumps({"level": "alert", "checkin_event_id": checkin_id})
+
+    pages = [
+        {
+            "events": [
+                {"message": "START RequestId: x Version: $LATEST\n"},
+                {"message": alert("c1")},
+                {"message": json.dumps({"level": "error", "msg": "poison"})},
+            ],
+            "nextToken": "t1",
+        },
+        {
+            "events": [
+                {"message": alert("c2")},
+                {"message": alert("c1")},  # redelivery logs the same alert twice
+                {"message": "END RequestId: x\n"},
+                {"message": "REPORT RequestId: x Duration: 1 ms\n"},
+            ]
+        },
+    ]
+
+    class Logs:
+        def __init__(self):
+            self.calls = []
+
+        def filter_log_events(self, **kwargs):
+            self.calls.append(kwargs)
+            return pages[len(self.calls) - 1]
+
+    logs = Logs()
+    monkeypatch.setattr(A, "client", lambda env, service: logs)
+    assert main(["alerts", "--env", "local"]) == 0
+    assert "3 alert log lines, 2 distinct alerts" in capsys.readouterr().out
+    assert logs.calls[1]["nextToken"] == "t1"
+
+
+def test_alerts_refuses_sim(capsys):
+    assert main(["alerts", "--env", "sim"]) == 2

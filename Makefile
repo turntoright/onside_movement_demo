@@ -89,13 +89,9 @@ dbt-build:
 	mkdir -p $(REPO_ROOT)/warehouse
 	cd dbt && $(DBT_ENV) $(DBT) build --target $(ENV)
 
-# Spec §9 step 2: stand-down alerts show up in the checker Lambda's logs (ENV=local only).
+# Spec §9 step 2: stand-down alerts show up in the checker Lambda's logs.
 alerts:
-	@if [ "$(ENV)" != local ]; then echo "error: alerts needs ENV=local" >&2; exit 2; fi
-	@$(GEN_PY) -c 'from generator.aws import client; \
-	events = client("local", "logs").filter_log_events( \
-	logGroupName="/aws/lambda/onside-standdown-checker", filterPattern="\"alert\"")["events"]; \
-	print(f"{len(events)} alert log events (first page)")'
+	$(GEN_PY) -m generator alerts --env $(ENV)
 
 sim-data:
 	$(MAKE) reset ENV=sim
