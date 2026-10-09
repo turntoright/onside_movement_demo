@@ -4363,3 +4363,21 @@ Leave the stack running if Plan 3 follows (it starts from this settled backfill)
   Makefile's `SCALE` is empty by default. `make tf-check` and a CI `terraform` job (fmt + validate,
   no credentials) are added; the LocalStack CI job stays in Plan 3.
 - **Measurement:** the full `local` scale ran in the dry run (16 minutes), so 10,000 check-ins stay.
+
+## Measured `local`-scale run (Task 13)
+
+| | Dry run (2026-10-10) | Execution |
+|---|---|---|
+| Check-ins / check-outs / plant movements | 9,227 / 8,494 / 250 | 9,227 / 8,494 / 250 |
+| Events emitted, emitter rate | 18,313 at 125 events/s | 18,313 at 131 events/s |
+| Settle time | 829 s | 855 s (37,375 envelopes compacted, 981 breaches) |
+| Wall time (`make generate MODE=backfill`) | 979 s (16.3 min, with setup) | 996 s (16.6 min, backfill only) |
+| End-to-end throughput | 18.7 events/s | 18.4 events/s |
+| `dbt build` | PASS=77 WARN=0 ERROR=0 | PASS=77 WARN=0 ERROR=0 |
+| Reconciliation | 975 matched; missed 42 offline, 1 reordered, 4 origin_end_not_seen; 0 false, 0 unexplained | 981 matched; missed 39 offline, 6 reordered, 7 origin_end_not_seen; 0 false, 0 unexplained |
+| `make alerts ENV=local` | n/a | 1005 alert log lines, 981 distinct alerts (equals matched) |
+| `local` scale decision | keep 10,000 check-ins (< 45 min) | keep 10,000 check-ins (996 s < 2,700 s) |
+
+Execution used a fresh stack (`make up`, `make deploy ENV=local` with 26 resources, `make setup
+ENV=local`); counts differ slightly from the dry run because of the anchor. Run id
+`e6c160c2-de82-5ba4-b530-6563ffcee6e5`, anchor 2026-10-09T15:40:06+00:00.
