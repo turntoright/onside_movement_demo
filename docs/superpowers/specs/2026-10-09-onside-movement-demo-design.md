@@ -1,6 +1,6 @@
 # Onside movement demo — design
 
-Date: 2026-10-09. Revision 3: blocking issues from reviews 1 and 2 fixed (see §12).
+Date: 2026-10-09. Revision 4: blocking issues from reviews 1–3 fixed (see §12).
 
 ## 1. Purpose
 
@@ -40,7 +40,7 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
  Generator (Python)
    ├─ setup: reference data → DynamoDB `properties` + S3 ref/ (same snapshot)
    ├─ PutEvents in received_time order: CheckIn / CheckOut / PlantMovement
-   └─ after settling: S3 control/settled/<run_id>.json
+   └─ settle & compact: S3 compacted/<env>/<run_id>/*.ndjson + control/settled/<run_id>.json
         ▼
  EventBridge bus: onside-events
    ├─ rule A (source=onside.app, CheckIn|CheckOut)
@@ -52,25 +52,25 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
    │                 └─ after commit: PutEvents (source=onside.standdown)
    │                       CheckInEvaluated, CheckOutApplied, HighRiskVisitDetected
    └─ rule B (all sources, excluding detail.poison) ──► Firehose (no transform)
-                              ──► S3 raw/ (arrival-hour prefixes)
+                              ──► S3 raw/ (arrival-hour prefixes; landing only)
                                     │
  Dagster (S3 sensor on control/settled/ + schedule)
-   └─ dbt-duckdb reads S3 → models → tests → DuckDB file
+   └─ dbt-duckdb reads S3 compacted/ → models → tests → DuckDB file
         └─ outputs: movements, network, high-risk visits, reconciliation,
                     key properties; trace job (read-only)
 ```
 
-- Rule A filters on `source = onside.app`, so the Lambda's own events never loop back
-  into the queue.
-- Rules A and B both use the pattern `"detail": {"poison": [{"exists": false}]}`
-  where needed. Poison events only reach the queue (to demo the DLQ). Rule B leaves
-  them out of S3.
+- **Rule A:** `source = onside.app` and detail-type CheckIn or CheckOut, with **no**
+  poison filter. Poison events must reach the queue to demo the DLQ. The source filter
+  also keeps the Lambda's own events from looping back.
+- **Rule B:** all sources, with `"detail": {"poison": [{"exists": false}]}`, so poison
+  events never reach S3.
 
 ### Components
 
 | Unit | Responsibility | Depends on |
 |---|---|---|
-| `generator/` | Builds reference data and the event stream; loads reference data; emits events; waits for settling; writes manifests | boto3 |
+| `generator/` | Builds reference data and the event stream; loads reference data; emits events; writes manifests; settles and compacts (§3.4) | boto3 |
 | `lambdas/standdown_checker/rules.py` | Pure stand-down logic (§4) | stdlib, tzdata |
 | `lambdas/standdown_checker/processor.py` | Event processing over a `StateStore` interface (§6.1). Shared by the Lambda and the local simulator | rules |
 | `lambdas/standdown_checker/dynamo_store.py` | `StateStore` on DynamoDB: reads, plus TransactWriteItems commits | boto3 |
@@ -103,7 +103,7 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
 - **`generate --backfill`** (run once before the demo):
   - 12 months of history ending at the wall-clock time when it starts.
   - It saves the generator state (each person's last visit, the counters and the seed)
-    to `state/generator_state.json`.
+    to `state/<env>/generator_state.json`.
   - It takes tens of minutes on LocalStack.
 - **`generate --live N`**:
   - Loads the generator state and **continues each person's timeline**.
@@ -113,8 +113,22 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
     appear in the demo.
   - It updates the generator state.
 - **Event ids:** `event_id = uuid5(run_id, sequence)`, so runs never collide.
-- **Manifests:** each run writes `manifests/<run_id>.json` (mode, seed, distinct
-  event_id counts per type). The checks sum all manifests.
+- **Environments:**
+  - Every generator command takes `ENV=local|aws`.
+  - Generator state and manifests live under `state/<env>/`, and are mirrored to that
+    environment's S3 `control/manifests/`.
+  - Settling and the asset checks read only the current environment's manifests, so
+    LocalStack and AWS never mix.
+- **Manifests:**
+  - Each run writes `control/manifests/<run_id>.json` (mode, seed, distinct event_id
+    counts per type) **before** emitting.
+  - The checks sum the environment's manifests.
+- **Scale per environment:**
+  - LocalStack: the default backfill.
+  - AWS: a small backfill (`N_CHECKINS=2000`) plus one live run, to keep DynamoDB
+    transactional write costs well under the budget.
+- **Clamping:** received_time is clamped to the run's end, so nothing is "received"
+  in the future.
 
 ### 3.3 Generator guarantees (every run)
 - **Seed:** fixed, so output is reproducible.
@@ -137,20 +151,35 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
   movements or stand-down checks.
 - **Poison:** only valid events go on the normal path. `generate --poison K` sends K
   malformed events with `detail.poison = true`, recorded in
-  `manifests/poison_<run_id>.json`.
-- **Local output:** `--local-out DIR` writes the generator events as JSON, runs
-  `local_sim` in received_time order, and writes its evaluation, applied and alert
-  events too. dbt can then be built and tested without AWS.
+  `control/manifests/poison_<run_id>.json`.
+- **Local output:** `--local-out DIR` writes **full EventBridge envelopes** (source,
+  detail-type, time, detail) as NDJSON, in the same layout as `compacted/`. It runs
+  `local_sim` in received_time order and writes its evaluation, applied and alert
+  envelopes too. dbt then reads local and S3 data with the same SQL.
 
-### 3.4 Settling
-A run is **settled** when all of these hold:
-- S3 holds every manifest event.
-- S3 holds one CheckInEvaluated per distinct check-in and one CheckOutApplied per
-  distinct check-out.
-- The SQS queue shows 0 visible and 0 in-flight messages.
+### 3.4 Settle and compact
+LocalStack's Firehose may write one small S3 object per event, and the backfill could
+produce hundreds of thousands of them. So nothing downstream reads `raw/` directly.
 
-The generator then waits one more Firehose buffer (60 s), writes
-`control/settled/<run_id>.json`, and exits. On a timeout it exits non-zero.
+`generator/settle.py` runs after emitting:
+1. **Scan incrementally.** List only arrival-hour prefixes from the run's start
+   onwards, and skip keys already parsed. A local key cache lives in `state/<env>/`.
+2. **Parse and count.** Parse each new object (concatenated JSON envelopes) and count
+   distinct event_ids per type.
+3. **Settled** when all of these hold:
+   - every manifest event is present;
+   - there is one CheckInEvaluated per distinct check-in and one CheckOutApplied per
+     distinct check-out;
+   - the SQS queue shows 0 visible and 0 in-flight messages;
+   - one more Firehose buffer (60 s) has passed, after which the scan is repeated.
+4. **Compact.** Write the run's parsed envelopes as a few NDJSON files under
+   `compacted/<env>/<run_id>/`. Write `control/settled/<run_id>.json`, then exit. On a
+   timeout, exit non-zero.
+
+dbt reads only `compacted/`, which is a few files per run. **Day 1** measures the
+LocalStack object count and the settle time at 10,000 events. If a full backfill would
+take more than about 45 minutes, the LocalStack default scale drops to 30,000
+check-ins.
 
 ### 3.5 Events (`detail` of each EventBridge event)
 
@@ -229,11 +258,11 @@ filter, each with the end and nights the Lambda used.
 - `stg_checkins`, `stg_checkouts`, `stg_plant_movements`, `stg_evaluations`,
   `stg_checkout_applied`, `stg_realtime_alerts`.
 - **Reading:**
-  - Raw objects are full EventBridge envelopes, concatenated by Firehose with no
-    delimiter.
-  - Read them with `read_json(glob, format='unstructured', columns={...})`, declaring
-    `detail` as JSON (no schema inference). Then extract the fields per detail-type.
-  - The source is S3 or `--local-out`, chosen by the target.
+  - Read `compacted/<env>/*/*.ndjson`, or the `--local-out` directory, chosen by the
+    target. Use `read_json(glob, format='newline_delimited', columns={...})`, declaring
+    `detail` as JSON (no schema inference).
+  - Then extract the fields per detail-type.
+  - Only `settle.py` reads the concatenated `raw/` objects.
 - **Filtering and dedupe:**
   - Drop any row with `detail.poison`.
   - Deduplicate events on event_id. Evaluations, applied events and alerts go on their
@@ -272,7 +301,9 @@ filter, each with the end and nights the Lambda used.
 
 ### Tracing
 A Dagster job with config property_id, start_time and max_hops (default 3). It opens
-DuckDB read-only.
+DuckDB read-only. `make trace` submits it through the Dagster run queue, so the
+concurrency pool applies. The algorithm is a pure-Python module with its own pytest
+tests.
 - **Edges:**
   - **People:** `connected` movements. Departure = the origin `visit_end`
     (inferred allowed). Arrival = the destination check-in.
@@ -299,8 +330,10 @@ incremental by received_time, a lookback window, and recomputing the affected pe
 
 ### 6.1 Lambda `standdown_checker`
 
-**Queue.** SQS standard queue with `ReportBatchItemFailures`, and the DLQ after 5
-receives. Delivery order is **not** assumed, so the processor is order-independent.
+**Queue.**
+- SQS standard queue with `ReportBatchItemFailures`.
+- Visibility timeout 30 s; DLQ after 5 receives, with 14-day retention.
+- Delivery order is **not** assumed, so the processor is order-independent.
 
 **State.**
 - **`person_state`**, one item per person:
@@ -308,25 +341,37 @@ receives. Delivery order is **not** assumed, so the processor is order-independe
   - `visits[]`, each with checkin_event_id, property_id, type, owner_company_id,
     checkin_time (null for a placeholder), checkout_event_id, checkout_time and
     checkout_applied_version.
-  - **No trimming.** At most 300 visits × about 150 bytes is under 50 KB, against the
-    400 KB item limit. Production would trim and keep dedupe in a separate store; the
-    README names this.
+  - Each check-out also stores `checkout_processed_at`, so re-emits are
+    byte-identical.
+  - **No trimming.** At most 300 visits × about 350 bytes (attribute names included)
+    is about 100 KB, against the 400 KB item limit. Production would trim and keep
+    dedupe in a separate store; the README names this.
+  - **Missing item:** a person with no item yet reads as `version_read = 0` and
+    `visits = []`. The first commit creates version 1.
 - **`evaluations`**, one item per checkin_event_id: the full CheckInEvaluated body.
 
 **Commit.** Each change is one `TransactWriteItems` call:
-- an update of `person_state` with the condition `version = :read`, which sets
+- an update of `person_state` with the condition
+  `attribute_not_exists(person_id) OR version = :read`, which sets
   `version = :read + 1`;
 - for a check-in, a put of the evaluation with the condition
   `attribute_not_exists(checkin_event_id)`.
 
-On a conflict, the processor reloads and retries up to 3 times, then fails the record.
+**Reads and retries.**
+- Reads use `ConsistentRead=True`.
+- On `TransactionCanceled`:
+  - If the evaluation put failed its condition, take the "already processed" path.
+  - Otherwise, retry from step 2 (including the duplicate check), with jittered
+    backoff, up to 3 times. After that, fail the record.
+- The in-memory store implements the same conditions.
 
 **Processing one record:**
 1. **Validate.** If invalid, the record fails (only poison events should).
 2. **Load** `person_state` and remember `version_read`.
 3. **CheckIn X:**
    - **Already processed** (an evaluation for X exists): re-emit the stored evaluation
-     and, for a breach, its alert. Done.
+     and, for a breach, its alert. The alert's property ids are rebuilt from
+     `visits[]`. Done.
    - **Otherwise:**
      - Look up the property (cached).
      - Evaluate per §4 against the visits with an observed check-in.
@@ -336,8 +381,8 @@ On a conflict, the processor reloads and retries up to 3 times, then fails the r
    - The duplicate test is "an evaluation exists", never "the id is in visits[]", so a
      placeholder is never mistaken for a processed check-in.
 4. **CheckOut C for check-in X:**
-   - If C is already applied to X: re-emit CheckOutApplied with the stored version.
-     Done.
+   - If C is already applied to X: re-emit CheckOutApplied with the stored version and
+     `checkout_processed_at`. Done.
    - If X exists in visits[] (placeholder or not): record C, keeping the earliest if
      the visit already has a check-out.
    - Otherwise: create a placeholder for X holding C.
@@ -379,13 +424,18 @@ matter.
   - movement origin ≠ destination;
   - every rule has 1 ≤ nights ≤ 14;
   - every evaluation's `origins_seen` equals the batch origin candidates within the
-    16-day bound whose versions are ≤ version_read.
+    16-day bound whose own `CheckInEvaluated.version_committed` ≤ D.version_read.
+  - each entry has `end_source = checkout` if and only if O's
+    `CheckOutApplied.version_committed` ≤ D.version_read.
   - alert iff `breach = true`;
   - completeness: one evaluation per check-in and one applied event per check-out.
 - **Golden cases** (`shared/golden_cases.csv`, pure rules only):
-  - Columns: case_id, role (origin or target), visit_id, property_type,
+  - Columns: case_id, role (origin or target), visit_id, property_id, property_type,
     owner_company_id, checkin_time, checkout_time, expected_breach, expected_rule_id,
     expected_origin_visit_id.
+  - A staging model splits the seed into the visits and properties relations that the
+    `standdown` macro expects, keyed by (case_id, property_id).
+  - Cases include a same-property origin, which must be excluded.
   - Cases: daylight saving, an intervening visit, most-specific scope, the pick order,
     the window edge, clipping at 0, no matching rule.
   - Pytest runs `rules.py` over it. A dbt singular test runs the `standdown` macro
@@ -401,8 +451,8 @@ matter.
 - **Concurrency:** dbt runs and the trace job share a concurrency pool of size 1, to
   avoid DuckDB file-lock conflicts.
 - **Asset checks:**
-  - **Completeness:** distinct event_ids per type in S3 equal the summed manifests,
-    for CheckIn, CheckOut and PlantMovement.
+  - **Completeness:** distinct event_ids per type in `compacted/<env>/` equal the
+    environment's summed manifests, for CheckIn, CheckOut and PlantMovement.
   - **DLQ:** `ApproximateNumberOfMessages` equals the summed poison manifests. Read
     the attribute only; never receive messages.
   - **Freshness:** after a live run, the latest received_time is within 15 minutes of
@@ -411,11 +461,12 @@ matter.
 ### 6.5 Firehose
 - Rule B targets Firehose with **no input transformer**, so the full EventBridge
   envelope, including `detail`, is delivered.
-- Records are concatenated without a delimiter; staging reads them with
-  `format='unstructured'`.
-- The buffer is 60 s / 1 MB. The default prefix is the arrival hour.
-- Delivery is at least once, so staging deduplicates.
-- Day 1 verifies the delivery and the DuckDB read on LocalStack.
+- Records are concatenated without a delimiter. Only `settle.py` reads them, with a
+  streaming JSON decoder (`json.JSONDecoder.raw_decode`).
+- The buffer is 60 s / 1 MB on AWS. LocalStack may ignore it.
+- The default prefix is the arrival hour.
+- Delivery is at least once, so both settle and staging deduplicate.
+- Day 1 verifies delivery, envelope content and the object count on LocalStack.
 
 ## 7. Testing strategy
 
@@ -483,19 +534,21 @@ Before the demo, `make generate MODE=backfill` has settled and Dagster has run o
 
 | Day | Work |
 |---|---|
-| D1 | Repo; LocalStack decision; check Firehose → S3 → DuckDB on LocalStack; generator; `rules.py` with golden cases |
+| D1 | Repo; LocalStack decision; Firehose → S3 check and scale measurement at 10k events; generator; `rules.py` with golden cases |
 | D2 | `processor.py` + `local_sim` (TDD), so `--local-out` produces evaluations; start Terraform |
-| D3 | dbt models and tests on `--local-out` data, including reconciliation |
-| D4 | Terraform finished, DynamoDB store, handler, LocalStack integration, settling |
-| D5 | Dagster (sensor, checks, trace), CI, real AWS deploy, README, rehearsal |
+| D3 | dbt models and tests on `--local-out` data, including reconciliation; trace algorithm (pure Python) |
+| D4 | Terraform finished, DynamoDB store, handler, settle & compact, LocalStack integration; **full backfill in the evening** |
+| D5 | Dagster (sensor, checks, trace job), CI, real AWS deploy, README, rehearsal |
 
 D5 is tight. The cut line protects it.
 
 **Cut line**, in this order, if time runs short:
 1. plant-material edges in tracing;
-2. the network Python model;
-3. the S3 sensor (keep the schedule only);
-4. the Firehose path. In that case the Lambda and the generator write their events
+2. the LocalStack CI job (integration stays a local `make` target);
+3. the network Python model;
+4. the S3 sensor (keep the schedule only);
+5. the trace Dagster job (keep `make trace` calling the module directly);
+6. the Firehose path. In that case the Lambda and the generator write their events
    to S3 directly.
 
 ## 11. Decisions
@@ -512,6 +565,10 @@ D5 is tight. The cut line protects it.
   named next step.
 - **One processor, two stores.** The Lambda and the local simulator share
   `processor.py`, so CI can run reconciliation without AWS.
+- **Raw is landing only.** dbt reads compacted NDJSON, so it never depends on how many
+  objects Firehose writes.
+- **State is per environment.** LocalStack and AWS each have their own generator
+  state, manifests and scale.
 
 ## 12. Review log
 
@@ -555,3 +612,16 @@ Non-blocking items from review 2 were also adopted:
 - N9: concurrency pool, read-only trace.
 - N10: cut item 4.
 - N11: offline and reordered split.
+
+**Review 3: 4 blocking issues, fixed in revision 4.** It confirmed that the review-2
+fixes, the version proofs, the 16-day bound (tight across daylight saving) and the
+tracing algorithm are sound.
+
+| # | Issue | Fix |
+|---|---|---|
+| 1 | Rule A's poison filter contradicted the DLQ demo | §2: rule A has no poison filter |
+| 2 | Commit condition failed on a person's first event | §6.1: missing item = version 0; `attribute_not_exists OR version` |
+| 3 | Manifests and state were shared across environments | §3.2: `state/<env>/`, per-environment manifests and scale |
+| 4 | LocalStack Firehose writes too many tiny objects | §3.4: incremental settle plus compaction; dbt reads `compacted/`; Day 1 measurement |
+
+All non-blocking items N1–N9 from review 3 were also adopted.
