@@ -28,6 +28,8 @@ What `make sim-e2e` proves:
 
 The same chain that Terraform deploys to AWS, on LocalStack 4.14.0 (community, no token):
 
+    make integration                          # the spec §7.3 test. It starts with `make up`, so it
+                                              # WIPES the current stack and backfill: run it first
     make up                                   # a fresh, empty LocalStack (also wipes state/local)
     make deploy ENV=local                     # Terraform (26 resources): bus, 2 rules, 2 queues + 2 DLQs,
                                               # 2 Lambdas, 3 DynamoDB tables, the bucket
@@ -38,7 +40,6 @@ The same chain that Terraform deploys to AWS, on LocalStack 4.14.0 (community, n
     make generate ENV=local MODE=live N=50    # the demo step; settles in under a minute
     make poison ENV=local K=2                 # malformed events reach the visit DLQ (~3 min)
     make settle ENV=local RUN=<run_id>        # resume a settle that timed out
-    make integration                          # the full chain on a fresh stack; make up after
 
 `make deploy` and `make destroy` never default: they need `ENV=local` or `ENV=aws` on the
 command line. `make test` needs no Docker (moto stands in for AWS).

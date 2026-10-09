@@ -206,7 +206,8 @@ tf-check:
 
 .PHONY: integration
 
-# The full chain on a fresh LocalStack. Run `make up` again before a demo backfill.
+# The full chain on a fresh LocalStack. It starts with `make up`, so it wipes the current
+# stack and backfill; run `make up` again before a demo backfill.
 integration: up
 	$(MAKE) deploy ENV=local
 	LOCALSTACK=1 $(VENV)/bin/pytest -q -m integration tests/integration
