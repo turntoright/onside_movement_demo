@@ -149,7 +149,8 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
   - Poison runs never write here; they write only `control/poison/` (§3.3).
   - The checks sum the environment's manifests.
 - **Scale per environment:**
-  - LocalStack: the `local` scale (about 10,000 check-ins; revision 7).
+  - LocalStack: the `local` scale: about 200 properties, 600 people, 10,000 check-ins
+    (revision 7).
   - AWS: a small backfill that scales people and properties down with it (about 100
     people, 40 properties, 3,000 check-ins) plus one live run. It still shows movements
     and breaches, and keeps DynamoDB transactional write costs well under the budget.
@@ -160,7 +161,8 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
 ### 3.3 Generator guarantees (every run)
 - **Seed:** fixed, so output is reproducible relative to the anchor time (the end of
   the backfill).
-- **Default scale:** about 500 properties, 2,000 people, 100,000 check-ins.
+- **Generator default scale** (no environment uses it by default since revision 7):
+  about 500 properties, 2,000 people, 100,000 check-ins.
   - At most 300 check-ins per person across all runs.
 - **Properties:** type (poultry, pork, beef, dairy, kiwifruit, vineyard, office, feed
   mill), group, `owner_company_id`, region, coordinates.
@@ -399,7 +401,7 @@ incremental by received_time, a lookback window, and recomputing the affected pe
 - Visibility timeout 30 s; Lambda timeout 25 s (it must not exceed the visibility
   timeout).
 - DLQ after 5 receives, with 14-day retention.
-- A poison message reaches the DLQ after about 2.5 minutes. `make poison` waits until
+- A poison message reaches the DLQ after about 3 minutes. `make poison` waits until
   the DLQ count is at least the expected value, with a 5-minute timeout. A duplicate
   delivery may push it above; the DLQ check then uses ≥.
 - Delivery order is **not** assumed, so the processor is order-independent.
@@ -535,17 +537,24 @@ matter.
 - **Asset checks:**
   - **Completeness:** distinct event_ids per type in `compacted/<env>/` equal the
     environment's summed manifests, for CheckIn, CheckOut and PlantMovement.
-  - **DLQ:** `ApproximateNumberOfMessages` ≥ the summed `control/poison/` manifests,
-    and the DLQ holds no more than 1 extra per poison event. Read the attribute only;
-    never receive messages.
+  - **DLQ:** the visit-queue DLQ's `ApproximateNumberOfMessages` ≥ the summed
+    `control/poison/` manifests, and holds no more than 1 extra per poison event; the
+    archive-queue DLQ holds 0. Read the attributes only; never receive messages.
   - **Freshness:** after a live run, the latest received_time is within 15 minutes of
     the settle time. Skipped for backfill.
 
 ### 6.5 Archiver (replaces Firehose since revision 7)
 - Rule B targets the SQS archive queue with **no input transformer**, so the full
   EventBridge envelope, including `detail`, is archived.
-- The archiver Lambda reads up to 100 messages per batch and writes them as one NDJSON
-  object `raw/<YYYY>/<MM>/<DD>/<HH>/<uuid>.ndjson` (arrival hour, UTC).
+- The archiver event source mapping uses batch size 100 with
+  `maximum_batching_window_in_seconds = 5` (AWS rejects batch > 10 without a window).
+  Archiver timeout 25 s; archive-queue visibility timeout 30 s (≥ the function timeout).
+- The archiver writes the batch as one NDJSON object
+  `raw/<YYYY>/<MM>/<DD>/<HH>/<uuid>.ndjson`: one compact JSON envelope per line, keyed by
+  the archiver's own UTC wall clock when it runs (never the envelope's `time`).
+- The archive queue has its **own** DLQ (maxReceiveCount 5, retention 14 days). Settle
+  fails fast with a clear message if the archive DLQ holds any message (archive data
+  would be missing; redrive it, then rerun `make settle`).
 - If the S3 write fails, the whole batch fails and is retried; delivery is therefore at
   least once, and settle and staging deduplicate.
 - Why not Firehose: on LocalStack it wrote one object per event, capped the whole bus at
@@ -563,6 +572,8 @@ matter.
      - duplicate and redelivery re-emitting byte-identical bodies;
      - earliest check-out kept;
      - the `origins_seen` bound.
+   - `archiver/handler.py` with moto S3: one object per batch; the whole batch fails
+     when the S3 write fails.
    - `dynamo_store.py` and `handler.py` with moto:
      - a transaction conflict and retry;
      - partial batch failure;
@@ -605,7 +616,7 @@ matter.
   spike). The compose service sets `ulimits nofile 65536`,
   `LAMBDA_EVENT_SOURCE_MAPPING_POLL_INTERVAL_SEC=0.05`, and mounts the docker socket
   (Lambda containers). A poison message reaches the DLQ in about 3 minutes there.
-  - Fallback if neither works: `ENV=sim` covers everything except
+  - Fallback if 4.14.0 stops working: `ENV=sim` covers everything except
     the AWS wiring. That is a reduced demo; the full chain is then shown only on real
     AWS.
 
@@ -634,7 +645,7 @@ Before the demo, `make generate MODE=backfill` has settled and Dagster has run o
 | D1 | Repo; LocalStack decision; Firehose → S3 check and scale measurement at 10k events; generator; `rules.py` with golden cases |
 | D2 | `processor.py` + `local_sim` (TDD), so `ENV=sim` produces evaluations; start Terraform |
 | D3 | dbt models and tests on `sim` data, including reconciliation; trace algorithm (pure Python) |
-| D4 | Terraform finished, DynamoDB store, handler, settle & compact, LocalStack integration; **full backfill in the evening** |
+| D4 | Terraform finished, DynamoDB store, handler, archiver, settle & compact, LocalStack integration; **full backfill in the evening** |
 | D5 | Dagster (sensor, checks, trace job), CI, real AWS deploy, README, rehearsal |
 
 D5 is tight. The cut line protects it.
@@ -773,3 +784,9 @@ Non-blocking items also adopted:
 - DynamoDB stores `visits` and evaluation bodies as JSON strings.
 - LocalStack settings and the `local` scale (about 10,000 check-ins) are recorded in §3.4
   and §8.
+- Review of revision 7: 1 blocking issue (archiver batch > 10 needs a batching window
+  on AWS), fixed in §6.5 together with the non-blocking notes: a separate archive DLQ
+  with a fail-fast settle and DLQ-check split (§6.4, §6.5); full `local` scale numbers;
+  poison timing of 3 minutes; the archiver's wall-clock key and compact lines; the
+  archiver added to the schedule and tests. The Plan 2 dry run must prove the archiver
+  on LocalStack (S3 write through the injected endpoint, batch > 10 with a window).
