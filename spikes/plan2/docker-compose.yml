@@ -1,0 +1,12 @@
+services:
+  localstack:
+    image: localstack/localstack:4.14.0
+    ports: ["4566:4566"]
+    ulimits:
+      nofile: {soft: 65536, hard: 65536}
+    environment:
+      - SERVICES=s3,sqs,events,firehose,dynamodb,lambda,iam,sts,logs
+      - PERSISTENCE=0
+      - LAMBDA_EVENT_SOURCE_MAPPING_POLL_INTERVAL_SEC=${POLL:-1}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

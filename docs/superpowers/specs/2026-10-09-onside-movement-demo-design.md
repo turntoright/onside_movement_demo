@@ -1,7 +1,8 @@
 # Onside movement demo — design
 
-Date: 2026-10-09. Revision 6.1: review 6 found no blocking issues; its non-blocking
-notes are folded in (see §12).
+Date: 2026-10-09. Revision 7 (2026-10-10): the Firehose path is replaced by an archiver
+Lambda after the Plan 2 spike; see §12 "Revision 7". Revision 6.1 had passed review 6
+with no blocking issues.
 
 ## 1. Purpose
 
@@ -20,8 +21,8 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
 (co-authored by Onside). Full notes: `mycv_management/opportunities/2026-09-onside-data-engineer/movement-data-research.md`.
 
 ### In scope
-- AWS event chain: EventBridge, SQS standard queue + DLQ, Lambda, DynamoDB, Firehose,
-  S3.
+- AWS event chain: EventBridge, SQS standard queues + DLQ, Lambda (stand-down checker
+  and archiver), DynamoDB, S3.
 - Terraform for all infrastructure, one codebase for LocalStack and AWS.
 - Dagster orchestration with dagster-dbt.
 - dbt with the DuckDB adapter, reading S3.
@@ -52,8 +53,9 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
    │                 ├─ DynamoDB evaluations    (one item per check-in)
    │                 └─ after commit: PutEvents (source=onside.standdown)
    │                       CheckInEvaluated, CheckOutApplied, HighRiskVisitDetected
-   └─ rule B (all sources, excluding detail.poison) ──► Firehose (no transform)
-                              ──► S3 raw/ (arrival-hour prefixes; landing only)
+   └─ rule B (all sources, excluding detail.poison) ──► SQS archive-queue (+DLQ)
+          ──► Lambda archiver (batch ≤ 100) ──► S3 raw/<YYYY>/<MM>/<DD>/<HH>/<uuid>.ndjson
+              (one NDJSON object per invocation; arrival-hour prefixes; landing only)
                                     │
  Dagster (S3 sensor on control/settled/ + schedule)
    └─ dbt-duckdb reads S3 compacted/ → models → tests → DuckDB file
@@ -65,8 +67,8 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
   poison filter. Poison events must reach the queue to demo the DLQ. The source filter
   also keeps the Lambda's own events from looping back.
 - **Rule B:** `source` in [onside.app, onside.standdown], with
-  `"detail": {"poison": [{"exists": false}]}`, so poison events never reach S3. Day 1
-  verifies `exists:false` on LocalStack.
+  `"detail": {"poison": [{"exists": false}]}`, so poison events never reach S3. The
+  Day-1 spike confirmed `exists:false` on LocalStack.
 
 ### Components
 
@@ -76,6 +78,7 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
 | `lambdas/standdown_checker/rules.py` | Pure stand-down logic (§4) | stdlib, tzdata |
 | `lambdas/standdown_checker/processor.py` | Event processing over a `StateStore` interface (§6.1). Shared by the Lambda and the local simulator | rules |
 | `lambdas/standdown_checker/dynamo_store.py` | `StateStore` on DynamoDB: reads, plus TransactWriteItems commits | boto3 |
+| `lambdas/archiver/handler.py` | SQS batch → one NDJSON object in S3 `raw/` | boto3 |
 | `lambdas/standdown_checker/handler.py` | SQS batch wrapper: partial batch failures, PutEvents with `FailedEntryCount` checked | processor |
 | `generator/local_sim.py` | `StateStore` in memory, persisted to `state/sim/sim_store.json` between runs. Runs `processor` in received_time order for `ENV=sim` | processor |
 | `shared/standdown_rules.csv` | The single source of rules: bundled into the Lambda zip and used as a dbt seed | — |
@@ -146,7 +149,7 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
   - Poison runs never write here; they write only `control/poison/` (§3.3).
   - The checks sum the environment's manifests.
 - **Scale per environment:**
-  - LocalStack: the default backfill.
+  - LocalStack: the `local` scale (about 10,000 check-ins; revision 7).
   - AWS: a small backfill that scales people and properties down with it (about 100
     people, 40 properties, 3,000 check-ins) plus one live run. It still shows movements
     and breaches, and keeps DynamoDB transactional write costs well under the budget.
@@ -199,8 +202,8 @@ Domain facts come from the public Onside help centre and from arXiv 2602.21491
     | `local`, `aws` | `s3://<bucket>/compacted/<env>/*/*.ndjson` | `s3://<bucket>/ref/` |
 
 ### 3.4 Settle and compact
-LocalStack's Firehose may write one small S3 object per event, and the backfill could
-produce hundreds of thousands of them. So nothing downstream reads `raw/` directly.
+The archiver writes one NDJSON object per invocation (up to 100 envelopes each). Delivery
+is at least once, so `raw/` can hold duplicates. Nothing downstream reads `raw/` directly.
 
 `generator/settle.py` runs after emitting:
 1. **Scan incrementally.**
@@ -208,7 +211,8 @@ produce hundreds of thousands of them. So nothing downstream reads `raw/` direct
      The extra hour absorbs clock skew.
    - Skip keys already parsed. A local key cache lives in `state/<env>/`.
 2. **Parse, spool and count.**
-   - Parse each new object (concatenated JSON envelopes).
+   - Parse each new object (NDJSON envelopes; the reader also tolerates concatenated
+     JSON).
    - Append its envelopes to a spool file `state/<env>/spool/<run_id>.ndjson`, so
      nothing is held in memory.
    - Count only **this run's** event_ids per type: `event_id = uuid5(run_id, seq)` with
@@ -222,8 +226,9 @@ produce hundreds of thousands of them. So nothing downstream reads `raw/` direct
    - there is one CheckInEvaluated per distinct check-in and one CheckOutApplied per
      distinct check-out;
    - there is one HighRiskVisitDetected per evaluation with `breach = true`;
-   - the SQS queue shows 0 visible and 0 in-flight messages;
-   - one more Firehose buffer (60 s) has passed, after which the scan is repeated.
+   - both the visit queue and the archive queue show 0 visible and 0 in-flight
+     messages;
+   - one more quiet period (30 s) has passed, after which the scan is repeated.
 4. **Compact.**
    - Write the spool as a few NDJSON files under `compacted/<env>/<run_id>/`.
    - Write `control/settled/<run_id>.json`, then exit.
@@ -234,12 +239,10 @@ produce hundreds of thousands of them. So nothing downstream reads `raw/` direct
 
 dbt reads only `compacted/`, which is a few files per run.
 
-**Scale checks:**
-- **Day 1:** measure the Firehose object count and the parse throughput at 10,000
-  events, using a stub queue consumer.
-- **Day 4:** measure Lambda throughput on LocalStack.
-- If a full backfill would take more than about 45 minutes, the LocalStack default
-  scale drops to 30,000 check-ins.
+**Scale (from the Plan 2 spike):** the LocalStack Lambda path measured about 25 events/s
+with `LAMBDA_EVENT_SOURCE_MAPPING_POLL_INTERVAL_SEC=0.05`. The LocalStack default is the
+`local` scale (about 10,000 check-ins, an estimated 25–35 minutes). Plan 2 measures the
+real handler and adjusts the number if needed.
 
 ### 3.5 Events (`detail` of each EventBridge event)
 
@@ -415,11 +418,14 @@ incremental by received_time, a lookback window, and recomputing the affected pe
   - **Missing item:** a person with no item yet reads as `version_read = 0` and
     `visits = []`. The first commit creates version 1.
 - **`evaluations`**, one item per checkin_event_id: the full CheckInEvaluated body.
+- **Storage format:** `visits` and the evaluation body are stored as JSON strings
+  (attribute type S), so reads return plain JSON types (no `Decimal`, no map key-order
+  issues) and the StateStore contract holds unchanged.
 
 **Commit.** Each change is one `TransactWriteItems` call:
-- an update of `person_state` with the condition
-  `attribute_not_exists(person_id) OR version = :read`, which sets
-  `version = :read + 1`;
+- an update of `person_state` that sets `version = :read + 1`, with the condition
+  `attribute_not_exists(person_id)` when `version_read = 0`, otherwise
+  `version = :read` (`:read` is only passed when it is used);
 - for a check-in, a put of the evaluation with the condition
   `attribute_not_exists(checkin_event_id)`.
 
@@ -535,15 +541,17 @@ matter.
   - **Freshness:** after a live run, the latest received_time is within 15 minutes of
     the settle time. Skipped for backfill.
 
-### 6.5 Firehose
-- Rule B targets Firehose with **no input transformer**, so the full EventBridge
-  envelope, including `detail`, is delivered.
-- Records are concatenated without a delimiter. Only `settle.py` reads them, with a
-  streaming JSON decoder (`json.JSONDecoder.raw_decode`).
-- The buffer is 60 s / 1 MB on AWS. LocalStack may ignore it.
-- The default prefix is the arrival hour.
-- Delivery is at least once, so both settle and staging deduplicate.
-- Day 1 verifies delivery, envelope content and the object count on LocalStack.
+### 6.5 Archiver (replaces Firehose since revision 7)
+- Rule B targets the SQS archive queue with **no input transformer**, so the full
+  EventBridge envelope, including `detail`, is archived.
+- The archiver Lambda reads up to 100 messages per batch and writes them as one NDJSON
+  object `raw/<YYYY>/<MM>/<DD>/<HH>/<uuid>.ndjson` (arrival hour, UTC).
+- If the S3 write fails, the whole batch fails and is retried; delivery is therefore at
+  least once, and settle and staging deduplicate.
+- Why not Firehose: on LocalStack it wrote one object per event, capped the whole bus at
+  about 20 events/s, and silently dropped events with concurrent senders (Day-1 and
+  Plan 2 spikes). The archiver uses only services the JD names and behaves the same on
+  LocalStack and AWS.
 
 ## 7. Testing strategy
 
@@ -588,13 +596,15 @@ matter.
   - The AWS bucket name includes the account id, so it is globally unique. The bucket
     has `force_destroy = true`, so `make destroy` works on a non-empty bucket.
 - **Real AWS:**
-  - Region ap-southeast-2, local Terraform state.
+  - Region ap-southeast-2, local Terraform state, hashicorp/aws provider `~> 6.0`
+    (6.68 verified against LocalStack).
   - A $5 budget alarm is created first; `make destroy` runs after the screenshots,
     which are stored in `docs/`.
   - Lambda packaged with `archive_file` (stdlib, tzdata, boto3 from the runtime).
-- **LocalStack:** since release 2026.03.0, the single image needs
-  `LOCALSTACK_AUTH_TOKEN`. Day 1 decides between the free hobby token and pinning a
-  pre-2026.03 4.x tag.
+- **LocalStack:** pinned to `localstack/localstack:4.14.0` (community, no token, Day-1
+  spike). The compose service sets `ulimits nofile 65536`,
+  `LAMBDA_EVENT_SOURCE_MAPPING_POLL_INTERVAL_SEC=0.05`, and mounts the docker socket
+  (Lambda containers). A poison message reaches the DLQ in about 3 minutes there.
   - Fallback if neither works: `ENV=sim` covers everything except
     the AWS wiring. That is a reduced demo; the full chain is then shown only on real
     AWS.
@@ -635,8 +645,7 @@ D5 is tight. The cut line protects it.
 3. the network Python model;
 4. the S3 sensor (keep the schedule only);
 5. the trace Dagster job (keep `make trace` calling the module directly);
-6. the Firehose path. In that case the Lambda and the generator write their events
-   to S3 directly.
+6. (obsolete since revision 7: the Firehose path no longer exists.)
 
 ## 11. Decisions
 
@@ -653,7 +662,9 @@ D5 is tight. The cut line protects it.
 - **One processor, two stores.** The Lambda and the local simulator share
   `processor.py`, so CI can run reconciliation without AWS.
 - **Raw is landing only.** dbt reads compacted NDJSON, so it never depends on how many
-  objects Firehose writes.
+  objects the archiver writes.
+- **Archiver instead of Firehose** (revision 7): reliable and identical on LocalStack and
+  AWS; see §6.5.
 - **State is per environment.** LocalStack and AWS each have their own generator
   state, manifests and scale.
 
@@ -753,3 +764,12 @@ Non-blocking items also adopted:
 - live timing after the last visit end, and open visits;
 - rule B source list, bucket `force_destroy`, poison timeout;
 - absolute paths via `REPO_ROOT`, the sim DuckDB name, trace for sim.
+
+**Revision 7 (2026-10-10, after Plan 1 and the Plan 2 spike).**
+- The Firehose path is replaced by rule B → SQS archive queue → archiver Lambda → NDJSON
+  objects in S3 (§2, §3.4, §6.5). Evidence: `docs/spikes/2026-10-plan2-localstack.md`.
+- The §6.1 commit condition is stated exactly as implemented and contract-tested:
+  absent item when `version_read = 0`, otherwise `version = :read`.
+- DynamoDB stores `visits` and evaluation bodies as JSON strings.
+- LocalStack settings and the `local` scale (about 10,000 check-ins) are recorded in §3.4
+  and §8.
