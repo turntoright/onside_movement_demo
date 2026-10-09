@@ -84,3 +84,32 @@ HOPS ?= 3
 
 trace:
 	$(PY) -m tracing --db $(REPO_ROOT)/warehouse/$(ENV).duckdb --property $(PROPERTY) --start $(START) --max-hops $(HOPS)
+
+# ---- LocalStack (ENV=local) ----
+
+LAMBDA_IMAGE := public.ecr.aws/lambda/python:3.12
+
+.PHONY: up down package
+
+# A full restart: LocalStack keeps nothing, so local state and Terraform state go too.
+# The Lambda image is pulled only when missing so the demo also runs offline.
+up:
+	docker compose down -v --remove-orphans
+	rm -rf $(REPO_ROOT)/state/local $(REPO_ROOT)/data/local $(REPO_ROOT)/warehouse/local.duckdb
+	rm -f $(REPO_ROOT)/infra/terraform/state/local.tfstate $(REPO_ROOT)/infra/terraform/state/local.tfstate.backup
+	docker compose up -d --wait
+	docker image inspect $(LAMBDA_IMAGE) >/dev/null 2>&1 || docker pull -q $(LAMBDA_IMAGE)
+
+down:
+	docker compose down -v --remove-orphans
+
+# Lambda bundles: the package plus, for the checker, the rules CSV next to it and the
+# pure-Python tzdata copied from the venv (no network). boto3 comes from the Lambda runtime.
+package:
+	rm -rf $(REPO_ROOT)/build/standdown_checker $(REPO_ROOT)/build/archiver
+	mkdir -p $(REPO_ROOT)/build/standdown_checker $(REPO_ROOT)/build/archiver
+	cp -r $(REPO_ROOT)/lambdas/standdown_checker $(REPO_ROOT)/build/standdown_checker/
+	cp $(REPO_ROOT)/shared/standdown_rules.csv $(REPO_ROOT)/build/standdown_checker/
+	cp -r "$$($(PY) -c 'import tzdata, os; print(os.path.dirname(tzdata.__file__))')" $(REPO_ROOT)/build/standdown_checker/
+	cp -r $(REPO_ROOT)/lambdas/archiver $(REPO_ROOT)/build/archiver/
+	find $(REPO_ROOT)/build -name __pycache__ -type d -prune -exec rm -rf {} +
