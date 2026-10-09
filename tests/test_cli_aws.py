@@ -4,6 +4,7 @@ from pathlib import Path
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError, EndpointConnectionError
 
 from generator import aws as A
 from generator import cli
@@ -161,6 +162,80 @@ def test_failed_emit_after_the_manifest_points_to_the_recovery(aws, repo, monkey
     err = capsys.readouterr().err
     assert "PutEvents rejected" in err
     assert "make up" in err
+    # The state the hint explains: manifest recorded, generator state never saved.
+    (manifest_key,) = s3_keys(aws, "control/manifests/")
+    assert len(list((repo / "state" / "local" / "manifests").glob("*.json"))) == 1
+    assert manifest_key.endswith(".json")
+    assert not (repo / "state" / "local" / "generator_state.json").exists()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        EndpointConnectionError(endpoint_url="http://localhost:4566"),
+        ClientError({"Error": {"Code": "AccessDenied", "Message": "no"}}, "PutEvents"),
+    ],
+)
+def test_aws_errors_from_emit_get_the_recovery_hint(aws, repo, monkeypatch, capsys, error):
+    main(["setup", "--env", "local", "--scale", "aws"])
+
+    def failing_emit(emissions, events_client, bus_name):
+        raise error
+
+    monkeypatch.setattr(cli, "emit", failing_emit)
+    args = ["generate", "--env", "local", "--mode", "backfill", "--anchor", ANCHOR, "--no-settle"]
+    assert main(args) == 2
+    err = capsys.readouterr().err
+    assert "make up" in err
+    assert "Traceback" not in err
+
+
+def test_poison_events_carry_the_poison_flag_and_the_dlq_target_sums_runs(aws, repo, monkeypatch):
+    sent = []
+
+    def fake_emit(emissions, events_client, bus_name):
+        sent.extend(emissions)
+        return len(emissions)
+
+    waits = []
+    monkeypatch.setattr(cli, "emit", fake_emit)
+    monkeypatch.setattr(
+        cli.Q, "wait_for_dlq", lambda sqs, url, expected, **kw: waits.append(expected)
+    )
+    assert main(["poison", "--env", "local", "--k", "2"]) == 0
+    assert main(["poison", "--env", "local", "--k", "3"]) == 0
+    assert all(e.detail["poison"] is True for e in sent) and len(sent) == 5
+    assert waits == [2, 5]
+
+
+def test_poison_on_a_lost_stack_writes_no_local_record(aws, repo, capsys):
+    for key in s3_keys(aws, ""):
+        aws.s3.delete_object(Bucket=aws.bucket, Key=key)
+    aws.s3.delete_bucket(Bucket=aws.bucket)
+    assert main(["poison", "--env", "local", "--k", "1", "--timeout", "0"]) == 2
+    assert "make up" in capsys.readouterr().err
+    assert not (repo / "state" / "local" / "poison").exists()
+
+
+def test_unprocessed_property_items_are_resent_with_backoff(aws, repo, monkeypatch):
+    main(["setup", "--env", "local", "--scale", "ci"])
+    delays = []
+    monkeypatch.setattr(cli, "sleep", delays.append)
+
+    class Flaky:
+        def __init__(self):
+            self.calls = 0
+
+        def batch_write_item(self, RequestItems):
+            self.calls += 1
+            return {"UnprocessedItems": RequestItems if self.calls <= 3 else {}}
+
+    conn = A.connect("local")
+    flaky = Flaky()
+    conn = type(conn)(conn.env, conn.outputs, conn.s3, flaky, conn.events, conn.sqs)
+    ref = cli.Reference.read(cli.ref_dir("local"))
+    cli._load_properties(conn, ref)
+    assert delays[:3] == [0.1, 0.2, 0.4]
 
 
 def test_failed_poison_emit_points_to_the_recovery(aws, repo, monkeypatch, capsys):

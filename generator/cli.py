@@ -6,9 +6,11 @@ import argparse
 import random
 import shutil
 import sys
+import time
 import uuid
 from datetime import UTC, datetime
 
+from botocore.exceptions import BotoCoreError, ClientError
 from standdown_checker.rules import load_rules
 
 from . import aws as A
@@ -44,6 +46,7 @@ from .stream import (
 RUN_NAMESPACE = uuid.UUID("0b6c3f0e-58f4-4d0c-9d8a-1d6f1f0a7c21")
 POISON_TIMEOUT_SECONDS = 300
 DYNAMODB_BATCH = 25
+sleep = time.sleep  # patched in tests
 
 
 def _now() -> datetime:
@@ -71,10 +74,13 @@ def _load_properties(conn: A.Connection, ref: Reference) -> None:
     table = conn.outputs.property_table
     for start in range(0, len(requests), DYNAMODB_BATCH):
         pending = {table: requests[start : start + DYNAMODB_BATCH]}
+        delay = 0.1
         for _ in range(10):
             pending = conn.dynamodb.batch_write_item(RequestItems=pending).get("UnprocessedItems")
             if not pending:
                 break
+            sleep(delay)
+            delay *= 2
         else:
             raise S.GeneratorError("DynamoDB kept returning unprocessed property items")
 
@@ -171,7 +177,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     if shortfall:
         print(f"note: {shortfall} requested check-ins did not fit (no one had room)")
     if conn is not None and not args.no_settle:
-        settle_run(conn, S.read_manifest(args.env, run_id), args.timeout)
+        settle_run(conn, manifest, args.timeout)
     return 0
 
 
@@ -179,7 +185,7 @@ def _emit(env: str, emissions: list[Emission], conn: A.Connection) -> int:
     """Emit after the control record is written; a failure leaves state that needs a reset."""
     try:
         return emit(emissions, conn.events, conn.outputs.bus_name)
-    except S.GeneratorError as exc:
+    except (S.GeneratorError, BotoCoreError, ClientError) as exc:
         raise S.GeneratorError(f"{exc}; {S.reset_hint(env)}") from None
 
 
@@ -206,11 +212,12 @@ def cmd_poison(args: argparse.Namespace) -> int:
     if args.env == "sim":
         raise S.GeneratorError("poison needs ENV=local or ENV=aws (it demonstrates the DLQ)")
     conn = A.connect(args.env)
+    conn.keys("control/")  # a lost stack fails here, before any local record is written
     run_id = str(uuid.uuid4())
     sent_at = _now()
     record = {"run_id": run_id, "k": args.k, "sent_at": sent_at.isoformat()}
-    S.write_json(state_dir(args.env) / "poison" / f"{run_id}.json", record)
     conn.put_json(f"control/poison/{run_id}.json", record)  # never control/manifests/
+    S.write_json(state_dir(args.env) / "poison" / f"{run_id}.json", record)
     poison = [
         Emission(sent_at, "CheckIn", {"poison": True, "event_id": event_id(run_id, seq)})
         for seq in range(args.k)
