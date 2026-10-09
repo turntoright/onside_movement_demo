@@ -42,6 +42,9 @@ The same chain that Terraform deploys to AWS, on LocalStack 4.14.0 (community, n
 
 `make deploy` and `make destroy` never default: they need `ENV=local` or `ENV=aws` on the
 command line. `make test` needs no Docker (moto stands in for AWS).
+Only the first `make deploy` of an environment needs the network (`terraform init` fetches the
+providers into `infra/terraform/.terraform-<env>/`); later deploys, including after `make up`,
+skip init and run offline.
 
 Measured on a 4-CPU laptop (`local` scale: 200 properties, 600 people, 9,227 check-ins,
 18,313 events): emitted at 131 events/s, settled 14 minutes later, 16.6 minutes in total

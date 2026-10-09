@@ -140,10 +140,24 @@ package:
 
 # ENV=aws only: the 12-digit account Terraform may touch (make deploy ENV=aws AWS_ACCOUNT_ID=...).
 AWS_ACCOUNT_ID ?=
-TF := terraform -chdir=$(REPO_ROOT)/infra/terraform
+TF_DIR := $(REPO_ROOT)/infra/terraform
+# One data directory per environment (gitignored), so switching ENV never re-initialises and
+# an initialised environment needs no network: `terraform init` always queries the registry.
+TF_DATA = $(TF_DIR)/.terraform-$(ENV)
+TF = CHECKPOINT_DISABLE=1 TF_DATA_DIR=$(TF_DATA) terraform -chdir=$(TF_DIR)
 # One local state file per environment: infra/terraform/state/<env>.tfstate (spec §8).
-TF_INIT = $(TF) init -input=false -reconfigure \
-	-backend-config=path=$(REPO_ROOT)/infra/terraform/state/$(ENV).tfstate
+TF_BACKEND = $(TF_DIR)/state/$(ENV).tfstate
+# The stamp holds the backend path and a hash of the provider lock file and versions.tf from
+# the last successful init. Init runs again only when the data directory is new, the backend
+# path changed (a moved checkout: hence -reconfigure) or the providers changed (an upgrade,
+# which is online anyway). Content hashes, not mtimes: a branch switch or a fresh clone
+# touches mtimes and must not force an online init.
+TF_STAMP = $(TF_DATA)/init.stamp
+TF_INIT_KEY = echo "$(TF_BACKEND) $$(cat $(TF_DIR)/.terraform.lock.hcl $(TF_DIR)/versions.tf | sha256sum | cut -c1-64)"
+TF_INIT = if [ "$$(cat $(TF_STAMP) 2>/dev/null)" != "$$($(TF_INIT_KEY))" ]; then \
+		$(TF) init -input=false -reconfigure -backend-config=path=$(TF_BACKEND) \
+		&& $(TF_INIT_KEY) > $(TF_STAMP); \
+	else echo "terraform: $(TF_DATA) is initialised; skipping init"; fi
 # ENV=local always carries the LocalStack endpoint; ENV=aws carries the account allow-list.
 TF_VARS = -var env=$(ENV) \
 	$(if $(filter local,$(ENV)),-var localstack_endpoint=$(LOCALSTACK_ENDPOINT)) \
@@ -157,20 +171,21 @@ infra-env:
 
 deploy: infra-env package
 	mkdir -p $(REPO_ROOT)/infra/terraform/state $(REPO_ROOT)/state/$(ENV)
-	$(TF_INIT)
+	@$(TF_INIT)
 	$(TF) apply -input=false -auto-approve $(TF_VARS)
 	$(TF) output -json > $(REPO_ROOT)/state/$(ENV)/outputs.json.tmp
 	mv $(REPO_ROOT)/state/$(ENV)/outputs.json.tmp $(REPO_ROOT)/state/$(ENV)/outputs.json
 
 destroy: infra-env package
-	$(TF_INIT)
+	@$(TF_INIT)
 	$(TF) destroy -input=false -auto-approve $(TF_VARS)
 	$(if $(filter aws,$(ENV)),rm -rf $(REPO_ROOT)/state/aws)
 
+# Its own data directory without a backend, so it never touches an environment's init.
 tf-check:
-	$(TF) fmt -check -recursive
-	$(TF) init -input=false -backend=false
-	$(TF) validate
+	terraform -chdir=$(TF_DIR) fmt -check -recursive
+	TF_DATA_DIR=$(TF_DIR)/.terraform-check terraform -chdir=$(TF_DIR) init -input=false -backend=false
+	TF_DATA_DIR=$(TF_DIR)/.terraform-check terraform -chdir=$(TF_DIR) validate
 
 # ---- integration (spec §7.3) ----
 
