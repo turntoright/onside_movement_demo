@@ -87,18 +87,26 @@ class Connection:
         body = json.dumps(value, indent=1, sort_keys=True).encode()
         self.s3.put_object(Bucket=self.outputs.bucket, Key=key, Body=body)
 
-    def keys(self, prefix: str) -> list[str]:
+    def objects(self, prefix: str) -> list[dict]:
+        """The listing entries (Key, LastModified, ...) under a prefix."""
         # After a LocalStack restart the bucket is gone while state/<env>/outputs.json survives.
         try:
             paginator = self.s3.get_paginator("list_objects_v2")
             pages = paginator.paginate(Bucket=self.outputs.bucket, Prefix=prefix)
-            return [obj["Key"] for page in pages for obj in page.get("Contents", [])]
+            return [obj for page in pages for obj in page.get("Contents", [])]
         except BotoConnectionError:
             raise self._gone() from None
         except ClientError as exc:
             if exc.response.get("Error", {}).get("Code") == "NoSuchBucket":
                 raise self._gone() from None
             raise
+
+    def keys(self, prefix: str) -> list[str]:
+        return [obj["Key"] for obj in self.objects(prefix)]
+
+    def get_json(self, key: str):
+        body = self.s3.get_object(Bucket=self.outputs.bucket, Key=key)["Body"].read()
+        return json.loads(body)
 
     def _gone(self) -> GeneratorError:
         return GeneratorError(

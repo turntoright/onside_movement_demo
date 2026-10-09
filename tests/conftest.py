@@ -1,8 +1,11 @@
+import json
 import os
 
+import boto3
 import pytest
 from moto import mock_aws
 
+from generator import aws as A
 from tests.aws_fixtures import REGION, MotoStack
 
 
@@ -22,3 +25,15 @@ def aws(monkeypatch):
         monkeypatch.delenv(name)
     with mock_aws():
         yield MotoStack.create()
+
+
+@pytest.fixture
+def deployed(aws, tmp_path, monkeypatch):
+    """REPO_ROOT with a deployed `local` env; its AWS clients are moto's."""
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        A, "client", lambda env, service, region: boto3.client(service, region_name=region)
+    )
+    (tmp_path / "state" / "local").mkdir(parents=True)
+    (tmp_path / "state" / "local" / "outputs.json").write_text(json.dumps(aws.outputs()))
+    return tmp_path

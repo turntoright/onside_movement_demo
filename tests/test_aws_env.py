@@ -111,3 +111,18 @@ def test_listing_with_localstack_down_says_make_up(aws):
     conn = A.Connection("local", _connection(aws).outputs, Down(), None, None, None)
     with pytest.raises(S.GeneratorError, match="make up"):
         conn.keys("control/")
+
+
+def test_objects_carry_last_modified_and_get_json_reads_back(aws):
+    conn = _connection(aws)
+    conn.put_json("control/settled/run-1.json", {"run_id": "run-1"})
+    conn.put_json("raw/2026/10/10/01/x.ndjson", {})
+    [entry] = conn.objects("control/settled/")
+    assert entry["Key"] == "control/settled/run-1.json"
+    assert entry["LastModified"].tzinfo is not None
+    assert conn.get_json(entry["Key"]) == {"run_id": "run-1"}
+    aws.s3.delete_object(Bucket=aws.bucket, Key="control/settled/run-1.json")
+    aws.s3.delete_object(Bucket=aws.bucket, Key="raw/2026/10/10/01/x.ndjson")
+    aws.s3.delete_bucket(Bucket=aws.bucket)
+    with pytest.raises(S.GeneratorError, match="make up"):
+        conn.objects("control/settled/")
