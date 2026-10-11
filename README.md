@@ -12,11 +12,11 @@ ran once on real AWS (2026-10-11) through the runbook, then was torn down. Desig
 | Onside feature | In this demo |
 |---|---|
 | Check-ins, check-outs and movements | The generator plays the app backend: `CheckIn`, `CheckOut` and `PlantMovement` events on an EventBridge bus; `fct_movements` joins consecutive visits into movements |
-| High risk visits (stand-down rules) | The `standdown_checker` Lambda applies the property-type rules on every check-in and emits `HighRiskVisitDetected`; `fct_high_risk_visits` recomputes the same rules in SQL |
+| High risk visits (stand-down rules) | The `standdown_checker` Lambda evaluates every check-in against the property-type rules and emits `HighRiskVisitDetected` on a breach; `fct_high_risk_visits` recomputes the same rules in SQL |
 | Tracing add-on | `make trace`: the earliest arrival at every property reachable from one property within N hops, over people and plant-material movements (a Dagster job) |
 | Key property identification | `dim_property_network`: in/out degree, weighted strength and weighted PageRank of the movement network (a dbt Python model) |
 | Reconciliation | `fct_alert_reconciliation`: every breach the warehouse finds is either matched by a real-time alert or missed with a cause proven from DynamoDB item versions |
-| Offline, late and duplicate check-ins | About 5% of events arrive late (up to 7 days in the backfill), about 2% are sent twice; the Lambda is order-independent and every stage deduplicates |
+| Offline, late and duplicate check-ins | About 5% of events arrive late (up to 7 days in the backfill), about 2% are sent twice; the Lambda is order-independent and idempotent, and dbt staging removes the duplicates that reach `raw/` |
 
 ## Architecture
 
@@ -168,7 +168,8 @@ On real AWS (ap-southeast-2), at the `aws` scale (40 properties, 100 people), on
 | Cost | US$0.00 in Cost Explorer and the budget on the day (Cost Explorer lags about a day) |
 
 Real AWS reordered more than LocalStack: 21 origin check-ins reached the Lambda after the
-visits that needed them (`reordered`; 0 in the full LocalStack run above). The warehouse
+visits that needed them (`reordered`; 0 in the full LocalStack run above, up to 7 in earlier
+LocalStack runs recorded in the plan notes). The warehouse
 explained each one from the DynamoDB item versions.
 
 ## Testing
@@ -177,8 +178,8 @@ explained each one from the DynamoDB item versions.
   LocalStack), with moto standing in for AWS. They cover the stand-down rules over the golden
   cases, the processor, both Lambdas, settle, the generator CLI, tracing, the Dagster sensor,
   checks, trace job and definitions, and the Makefile wiring. No Docker needed.
-- **dbt (`make sim-e2e`):** generic and singular tests, unit tests, and the golden cases run
-  through the same SQL macro as the warehouse (PASS=77).
+- **dbt (`make sim-e2e`):** generic and singular tests, unit tests, and the 13 golden cases
+  (30 visit rows) run through the same SQL macro as the warehouse; the whole build is PASS=77.
 - **Integration (`make integration`):** the full chain on a fresh LocalStack: out-of-order,
   duplicate, orphan check-out and poison cases, then settle, DynamoDB, S3 and DLQ assertions
   (306 s including the fresh stack and the deploy; the test itself 198 s). CI runs it on
@@ -190,8 +191,8 @@ explained each one from the DynamoDB item versions.
 
 - Incremental dbt models by received time with a lookback window, recomputing only the
   affected people (here every model is rebuilt in full).
-- Trim per-person state and keep deduplication in a separate store (the demo bounds a
-  person's history at 300 visits instead).
+- Trim per-person state and keep deduplication in a separate store (the demo does not trim;
+  the generator bounds a person's history at 300 check-ins instead).
 - API Gateway or webhooks for ingestion (the generator plays the app backend).
 - Iceberg tables with Athena; ClickHouse for customer-facing reports; BI dashboards.
 - Stand-down rules per property and group, and temporary outbreak overrides (the demo has
