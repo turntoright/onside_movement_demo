@@ -3,7 +3,7 @@ onside_movement:
   outputs:
     sim:
       type: duckdb
-      path: "{{ env_var('REPO_ROOT', '.') }}/warehouse/sim.duckdb"
+      path: "{{ env_var('REPO_ROOT', '..') }}/warehouse/sim.duckdb"
       threads: 4
       extensions: [icu, json]
       settings:
@@ -11,7 +11,7 @@ onside_movement:
     # LocalStack S3 (spec §3.3): path-style, no TLS, LocalStack's fixed test credentials.
     local:
       type: duckdb
-      path: "{{ env_var('REPO_ROOT', '.') }}/warehouse/local.duckdb"
+      path: "{{ env_var('REPO_ROOT', '..') }}/warehouse/local.duckdb"
       threads: 4
       extensions: [icu, json, httpfs]
       settings:
@@ -28,7 +28,7 @@ onside_movement:
     # reads it from state/<env>/outputs.json), ap-southeast-2 by default.
     aws:
       type: duckdb
-      path: "{{ env_var('REPO_ROOT', '.') }}/warehouse/aws.duckdb"
+      path: "{{ env_var('REPO_ROOT', '..') }}/warehouse/aws.duckdb"
       threads: 4
       extensions: [icu, json, httpfs, aws]
       settings:

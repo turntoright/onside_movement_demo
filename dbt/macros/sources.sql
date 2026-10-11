@@ -1,5 +1,5 @@
 {% macro compacted_events() -%}
-read_json('{{ env_var("DBT_COMPACTED_GLOB", "data/sim/compacted/*/*.ndjson") }}',
+read_json('{{ env_var("DBT_COMPACTED_GLOB", "../data/sim/compacted/*/*.ndjson") }}',
     format = 'newline_delimited',
     columns = {
         'id': 'VARCHAR',
@@ -11,5 +11,5 @@ read_json('{{ env_var("DBT_COMPACTED_GLOB", "data/sim/compacted/*/*.ndjson") }}'
 {%- endmacro %}
 
 {% macro ref_file(name) -%}
-read_json('{{ env_var("DBT_REF_ROOT", "data/sim/ref/") }}{{ name }}.json', format = 'array')
+read_json('{{ env_var("DBT_REF_ROOT", "../data/sim/ref/") }}{{ name }}.json', format = 'array')
 {%- endmacro %}
