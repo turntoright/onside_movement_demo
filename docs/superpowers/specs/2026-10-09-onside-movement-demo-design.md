@@ -19,7 +19,7 @@ Success means:
   warehouse model quality.
 
 Domain facts come from the public Onside help centre and from arXiv 2602.21491
-(co-authored by Onside). Full notes: `mycv_management/opportunities/2026-09-onside-data-engineer/movement-data-research.md`.
+(co-authored by Onside).
 
 ### In scope
 - AWS event chain: EventBridge, SQS standard queues + DLQ, Lambda (stand-down checker

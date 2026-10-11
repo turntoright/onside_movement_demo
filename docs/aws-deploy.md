@@ -32,6 +32,24 @@ export AWS_ACCOUNT_ID=<the 12 digits>
 
 The quota check comes after step 2, once nothing can point at LocalStack.
 
+If you sign in to the console without an IAM user (for example an AWS Builder ID), `aws login`
+(AWS CLI 2.32 or later) turns that console session into CLI credentials. The project's boto3
+cannot read an `aws login` profile without `botocore[crt]`, so add a second profile that
+wraps it, and use that one as `AWS_PROFILE`. Terraform and DuckDB read it too:
+
+```bash
+aws login --profile onside-demo --region ap-southeast-2
+cat >> ~/.aws/config <<'EOF'
+[profile onside-demo-proc]
+credential_process = aws configure export-credentials --profile onside-demo --format process
+region = ap-southeast-2
+EOF
+export AWS_PROFILE=onside-demo-proc
+```
+
+The exported credentials last about 15 minutes and are refreshed on demand. When the login
+session itself expires, run `aws login --profile onside-demo` again.
+
 ## 2. Make sure nothing points at LocalStack
 
 ```bash
@@ -84,10 +102,13 @@ The first run downloads the providers (`infra/terraform/.terraform-aws/`). The p
 26 resources, among them the bus, 2 rules, 2 queues and 2 DLQs, 2 Lambdas with roles and log
 groups, 3 DynamoDB tables (`onside-person-state`, `onside-evaluations`, `onside-properties`)
 and the bucket `onside-aws-<account id>`, plus EventBridge targets, queue and role policies,
-the two event source mappings and the bucket policy: 26 in all. Answer `y`. Then back up the state until step 8 is done:
+the two event source mappings and the bucket policy: 26 in all. Answer `y`. Then back up the
+state until step 8 is done, into a private directory (on another disk if you have one):
 
 ```bash
-cp infra/terraform/state/aws.tfstate ~/onside-aws.tfstate.backup
+BACKUP_DIR=~/backups/onside_movement_demo   # or e.g. /mnt/data/backups/onside_movement_demo
+mkdir -p "$BACKUP_DIR" && chmod 700 "$BACKUP_DIR"
+cp infra/terraform/state/aws.tfstate "$BACKUP_DIR/aws.tfstate.$(date +%Y%m%d-%H%M%S)"
 ```
 
 ## 5. Let DuckDB fetch its AWS extensions (M14)
@@ -120,11 +141,12 @@ Check the time-zone data once (spec §2: the Lambda reads only its bundled tzdat
 
 ```bash
 aws logs filter-log-events --log-group-name /aws/lambda/onside-standdown-checker \
-  --region ap-southeast-2 --filter-pattern '{ $.event = "cold_start" }' --max-items 1 \
+  --region ap-southeast-2 --filter-pattern '{ $.event = "cold_start" }' \
   --query 'events[0].message' --output text
 ```
 
-Expected: a line containing `"tzpath": []`.
+Expected: a line containing `"tzpath": []`. (With `--max-items 1` the CLI can stop on an empty
+first page and print `None`.)
 
 Then the DLQ demo (about 3 minutes). Run it last:
 
@@ -169,8 +191,13 @@ backfill and the live run). Then:
 make trace ENV=aws PROPERTY=<a property id, e.g. from make alerts> START=<ISO time with offset>
 ```
 
-The DynamoDB console's item count refreshes only about every 6 hours: use "Get live item
-count" before taking `aws-06-dynamodb.png`.
+The DynamoDB console's item count refreshes only about every 6 hours, so the Tables list shows
+0 items and 0 bytes at first. Open `onside-evaluations`: its Settings tab has "Get live item
+count" (General information) → Start scan. Take `aws-06-dynamodb.png` with that result showing.
+
+The alert log lines carry `"level": "alert"` and the alert's fields, not the text
+`HighRiskVisitDetected`, so search for them with a JSON filter. The page's default time range
+(1 hour) can also miss them: pick a relative range that covers the run, such as 12 hours.
 
 Take these screenshots and save them as PNG files under `docs/screenshots/`:
 
@@ -180,8 +207,8 @@ Take these screenshots and save them as PNG files under `docs/screenshots/`:
 | `aws-02-eventbridge.png` | EventBridge → Event buses → `onside-events` → Rules | rules `onside-visits` and `onside-archive` |
 | `aws-03-sqs.png` | SQS → Queues | the four queues; `onside-visit-dlq` holding the poison messages |
 | `aws-04-lambda.png` | Lambda → `onside-standdown-checker` → Monitor | invocations and the SQS trigger |
-| `aws-05-alert-log.png` | CloudWatch → Log groups → `/aws/lambda/onside-standdown-checker` | a `"level": "alert"` line (HighRiskVisitDetected) |
-| `aws-06-dynamodb.png` | DynamoDB → Tables | the three `onside-*` tables with item counts |
+| `aws-05-alert-log.png` | CloudWatch → Log groups → `/aws/lambda/onside-standdown-checker` → Search all log streams, filter `{ $.level = "alert" }` | one expanded `"level": "alert"` line |
+| `aws-06-dynamodb.png` | DynamoDB → Tables → `onside-evaluations` → Settings → Get live item count | the three `onside-*` tables and the live item count |
 | `aws-07-s3.png` | S3 → `onside-aws-<account>` | the `raw/`, `compacted/aws/`, `control/` and `ref/` prefixes |
 | `dagster-01-lineage.png` | Dagster → Assets → Lineage | the dbt graph from staging to marts |
 | `dagster-02-sensor.png` | Dagster → Automation → `settled_runs` | ticks that requested runs |
@@ -216,7 +243,7 @@ stay as a guard. To remove it too:
 make budget-destroy ENV=aws AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID BUDGET_EMAIL=<your address>
 ```
 
-Delete `~/onside-aws.tfstate.backup` once both are gone.
+Delete the state backup from step 4 (`$BACKUP_DIR`) once the checks above are clean.
 
 ## 9. Cost estimate
 

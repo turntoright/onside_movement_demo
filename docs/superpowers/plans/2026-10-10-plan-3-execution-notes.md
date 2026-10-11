@@ -168,3 +168,23 @@ the code, as a controller amendment.
   the offline rehearsal. Dagster is stopped; its history keeps one FAILURE `dbt_build` from the
   recovery probe. LocalStack keeps nothing across a Docker
   or laptop restart. Rebuilding with `make up` and the quick start takes about 30 minutes.
+
+## AWS run (2026-10-11)
+
+The runbook ran once on real AWS, from budget to teardown. The results are in the README; the
+11 screenshots are in `docs/screenshots/`.
+
+- **Account:** a new AWS account. The console sign-in is an AWS Builder ID, with no IAM user.
+  The CLI used `aws login`, wrapped in a `credential_process` profile because the project's
+  boto3 needs `botocore[crt]` to read `aws login` credentials. Terraform aws 6.68.0 and DuckDB's
+  `credential_chain` read the wrapper too. The runbook's step 1 now shows this.
+- **Lambda concurrency quota:** 400, so the step-2 check passed.
+- **Runbook fixes:**
+  - The tz check's `--max-items 1` printed `None`.
+  - The alert log lines hold no `HighRiskVisitDetected` text, and the console's 1-hour default
+    range missed them.
+  - "Get live item count" sits on the table's Settings tab.
+  - The state backup now goes to a private directory.
+- **Teardown:** the tag, IAM role and log group checks were empty, and the S3 bucket, tables,
+  queues and functions were gone. The US$5 budget was kept as a guard, and the state backup
+  was deleted.

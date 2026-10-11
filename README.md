@@ -4,7 +4,7 @@ Farm check-ins and movements between properties become biosecurity alerts in rea
 AWS event chain (EventBridge, SQS, Lambda, DynamoDB, S3). A warehouse built by Dagster and
 dbt then recomputes every alert, explains each one that real time missed, and traces how a
 disease could have spread. It runs offline on a laptop through LocalStack. The same Terraform
-is ready for AWS, with a runbook prepared but not yet run. Design:
+ran once on real AWS (2026-10-11) through the runbook, then was torn down. Design:
 [docs/superpowers/specs/2026-10-09-onside-movement-demo-design.md](docs/superpowers/specs/2026-10-09-onside-movement-demo-design.md).
 
 ## What it maps to in Onside
@@ -71,10 +71,11 @@ online run of the quick start (image pulls, `make venv`, the Terraform providers
 `make deploy`, DuckDB's httpfs install), the demo runs with the network off; this was proved
 with `unshare -rn` (see Results).
 
-**AWS (prepared, not yet run):** the runbook [docs/aws-deploy.md](docs/aws-deploy.md)
+**AWS (run once, 2026-10-11):** the runbook [docs/aws-deploy.md](docs/aws-deploy.md)
 creates a US$5 budget first (`make budget ENV=aws AWS_ACCOUNT_ID=<id> BUDGET_EMAIL=<address>`),
 deploys the same Terraform (`make deploy ENV=aws AWS_ACCOUNT_ID=<id>`), runs a small dataset,
-and tears it all down. Nothing in this repo touches AWS unless `ENV=aws` is given.
+and tears it all down. The screenshots are in [docs/screenshots/](docs/screenshots/); the
+results are below. Nothing in this repo touches AWS unless `ENV=aws` is given.
 
 ## Demo script (about 5 minutes)
 
@@ -151,6 +152,24 @@ Measured on a 4-CPU laptop with LocalStack, at the `local` scale (200 properties
 | Trace | P0172: 62 properties within 3 hops in 18.4 s, identical to `python -m tracing` on the same warehouse; submitted during a `dbt_build` run, it waited for the `duckdb` pool (no lock error) |
 | Poison K=2 | reached the visit DLQ in 3 min 02 s (offline rehearsal); the next `dead_letter_queues` check passed (2 injected, 2 in the visit DLQ) |
 | Offline rehearsal | deploy (0 changes), Dagster, a live run of 50 (settled in 105 s), the sensor's `dbt_build` (51/51), trace and poison: 514 s in total, under `unshare -rn` with only LocalStack relayed |
+
+On real AWS (ap-southeast-2), at the `aws` scale (40 properties, 100 people), on 2026-10-11:
+
+| | |
+|---|---|
+| Deploy and teardown | 26 resources created; after `make destroy`, the tag, IAM role and log group checks found nothing left |
+| Backfill | 2,828 check-ins, 2,602 check-outs, 75 plant movements: 5,604 events sent at 11 events/s (each `PutEvents` is a round trip to Sydney), settled in 239 s, 775 s in total; 466 breaches |
+| Live run of 50 | 99 events, settled in 317 s with 12 breaches |
+| Dagster | the sensor started one `dbt_build` per settled run (80 s and 96 s); 51/51 checks passed |
+| Reconciliation | 478 matched, equal to the 478 distinct alerts from `make alerts` (485 alert log lines); 44 missed, each with a version-proven cause: 19 origin offline, 21 origin reordered, 4 origin check-out not yet seen; 0 false alerts, 0 unexplained |
+| Trace | P0003 (the top PageRank property at this scale): 30 properties within 3 hops; `make trace` took 28 s |
+| Poison K=2 | both messages in the visit DLQ 162 s after `make poison`; the archive DLQ stayed empty |
+| Lambda | 4,970 invocations, 0 errors; the cold-start log shows `"tzpath": []` |
+| Cost | US$0.00 in Cost Explorer and the budget on the day (Cost Explorer lags about a day) |
+
+Real AWS reordered more than LocalStack: 21 origin check-ins reached the Lambda after the
+visits that needed them (`reordered`; 0 in the full LocalStack run above). The warehouse
+explained each one from the DynamoDB item versions.
 
 ## Testing
 
